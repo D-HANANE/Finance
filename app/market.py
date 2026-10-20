@@ -59,7 +59,7 @@ class Market:
             "symbol": symbol,
             "price": round(self.prices[symbol], 4),
             "quantity": self.rng.randint(1, 100),
-            "timestamp": datetime.now(timezone.utc).isoformat(
+            "event_time": datetime.now(timezone.utc).isoformat(
                 timespec="microseconds"
             ),
         }
