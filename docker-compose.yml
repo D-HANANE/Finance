@@ -47,6 +47,20 @@ services:
       retries: 18
       start_period: 20s
     restart: unless-stopped
+  
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    restart: unless-stopped
 
   minio:
     image: docker.io/pgsty/silo:latest
