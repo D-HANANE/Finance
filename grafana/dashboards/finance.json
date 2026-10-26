@@ -1,0 +1,131 @@
+{
+  "uid": "finance-live",
+  "title": "March\u00e9 financier simul\u00e9",
+  "schemaVersion": 40,
+  "version": 1,
+  "timezone": "utc",
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "candlestick",
+      "title": "AAPL \u00b7 cours simul\u00e9s",
+      "datasource": {
+        "type": "postgres",
+        "uid": "finance-pg"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT minute_start AS time, open::float8, high::float8, low::float8, close::float8, volume::float8 FROM candles WHERE symbol='AAPL' AND $__timeFilter(minute_start) ORDER BY 1"
+        }
+      ],
+      "options": {
+        "mode": "both",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "candlestick",
+      "title": "MSFT \u00b7 cours simul\u00e9s",
+      "datasource": {
+        "type": "postgres",
+        "uid": "finance-pg"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT minute_start AS time, open::float8, high::float8, low::float8, close::float8, volume::float8 FROM candles WHERE symbol='MSFT' AND $__timeFilter(minute_start) ORDER BY 1"
+        }
+      ],
+      "options": {
+        "mode": "both",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "candlestick",
+      "title": "NVDA \u00b7 cours simul\u00e9s",
+      "datasource": {
+        "type": "postgres",
+        "uid": "finance-pg"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT minute_start AS time, open::float8, high::float8, low::float8, close::float8, volume::float8 FROM candles WHERE symbol='NVDA' AND $__timeFilter(minute_start) ORDER BY 1"
+        }
+      ],
+      "options": {
+        "mode": "both",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

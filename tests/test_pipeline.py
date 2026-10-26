@@ -18,15 +18,15 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(len({e["trade_id"] for e in events}), len(events))
         for event in events:
             self.assertGreater(event["price"], 0)
-            self.assertGreater(event["volume"], 0)
+            self.assertGreater(event["quantity"], 0)
             self.assertIsNotNone(datetime.fromisoformat(event["event_time"]).tzinfo)
             self.assertEqual(json.loads(json.dumps(event)), event)
 
     def test_controlled_shock(self):
         market = Market()
-        old = market.prices["FIN01"]
+        old = market.prices["AAPL"]
         market.shock()
-        self.assertAlmostEqual(market.prices["FIN01"] / old, 1.08)
+        self.assertAlmostEqual(market.prices["AAPL"] / old, 1.08)
 
 
 class StorageTests(unittest.TestCase):
@@ -67,6 +67,15 @@ class StorageTests(unittest.TestCase):
         fake = FakeS3()
         storage.archive(fake, "bronze", messages)
         self.assertTrue(fake.keys[-1].startswith("manifests/"))
+
+        broken = Message(0, 12, {})
+        broken.payload = b'not-json'
+        _, day, raw, parquet, offsets = storage.build_batch([broken])
+        self.assertEqual(day, 'invalid')
+        self.assertEqual(raw, b'not-json\n')
+        self.assertEqual(offsets, {('trades', 0): 13})
+        bad = pq.read_table(io.BytesIO(parquet)).to_pylist()[0]
+        self.assertIsNotNone(bad['_parse_error'])
 
 
 if __name__ == "__main__":

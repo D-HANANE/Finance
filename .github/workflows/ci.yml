@@ -1,0 +1,40 @@
+name: finance-ci
+on: [push, pull_request]
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt pyyaml==6.0.2 duckdb==1.0.0 dbt-core==1.9.2 dbt-duckdb==1.9.2 dbt-common==1.15.0 dbt-adapters==1.14.1 pydantic==2.10.6 protobuf==5.29.3
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/check_config.py
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: python -m venv .soda-venv
+      - run: .soda-venv/bin/pip install soda-core-duckdb==3.5.6 duckdb==1.0.0
+      - run: python scripts/test_gold.py
+        env:
+          SODA_BIN: ${{ github.workspace }}/.soda-venv/bin/soda
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dbt-results
+          path: |
+            dbt/target/run_results_success.json
+            dbt/target/run_results_expected_failure.json
+  streaming:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+      - run: pip install pyspark==3.5.5 psycopg2-binary==2.9.10
+      - run: spark-submit --master local[2] scripts/test_spark.py

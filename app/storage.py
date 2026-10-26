@@ -16,13 +16,14 @@ SCHEMA = pa.schema([
     ("trade_id", pa.string()),
     ("symbol", pa.string()),
     ("price", pa.decimal128(18, 4)),
-    ("volume", pa.int64()),
+    ("quantity", pa.int64()),
     ("event_time", pa.timestamp("us", tz="UTC")),
     ("_topic", pa.string()),
     ("_partition", pa.int32()),
     ("_offset", pa.int64()),
     ("_ingested_at", pa.timestamp("us", tz="UTC")),
     ("_batch_id", pa.string()),
+    ("_parse_error", pa.string()),
 ])
 
 
@@ -42,23 +43,35 @@ def build_batch(messages):
     rows, raw, offsets = [], [], {}
     for message in messages:
         payload = message.value()
-        event = json.loads(payload)
-        timestamp = datetime.fromisoformat(event["event_time"].replace("Z", "+00:00"))
-        if timestamp.tzinfo is None:
-            raise ValueError("event_time doit inclure un fuseau horaire")
-        rows.append({
-            "trade_id": str(event["trade_id"]), "symbol": str(event["symbol"]),
-            "price": Decimal(str(event["price"])).quantize(Decimal("0.0001")),
-            "volume": int(event["volume"]), "event_time": timestamp.astimezone(timezone.utc),
+        row = {
             "_topic": message.topic(), "_partition": message.partition(),
             "_offset": message.offset(), "_ingested_at": now, "_batch_id": batch_id,
-        })
+        }
+        try:
+            event = json.loads(payload)
+            timestamp = datetime.fromisoformat(event["event_time"].replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                raise ValueError("event_time doit inclure un fuseau horaire")
+            price = Decimal(str(event["price"])).quantize(Decimal("0.0001"))
+            quantity = int(event.get("quantity", event.get("volume")))
+            if not price.is_finite() or abs(price) >= Decimal('100000000000000'):
+                raise ValueError('Prix hors decimal(18,4)')
+            if not -(2**63) <= quantity < 2**63:
+                raise ValueError('Quantité hors int64')
+            row.update(trade_id=str(event['trade_id']), symbol=str(event['symbol']),
+                       price=price, quantity=quantity,
+                       event_time=timestamp.astimezone(timezone.utc), _parse_error=None)
+        except (ValueError, KeyError, TypeError, ArithmeticError) as error:
+            # Bronze must archive poison records too, and must not block forever.
+            row['_parse_error'] = f'{type(error).__name__}: {error}'
+        rows.append(row)
         raw.append(payload + b"\n")
         key = (message.topic(), message.partition())
         offsets[key] = max(offsets.get(key, -1), message.offset() + 1)
     # Date stable pour le chemin en cas de rejeu du même lot.
     # Le véritable instant d'ingestion reste _ingested_at.
-    day = min(row["event_time"] for row in rows).date().isoformat()
+    timestamps = [row['event_time'] for row in rows if row.get('event_time') is not None]
+    day = min(timestamps).date().isoformat() if timestamps else 'invalid'
     table = pa.Table.from_pylist(rows, schema=SCHEMA)
     buffer = io.BytesIO()
     pq.write_table(table, buffer, compression="snappy", version="2.6")

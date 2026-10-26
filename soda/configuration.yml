@@ -1,0 +1,4 @@
+data_source finance:
+  type: duckdb
+  path: /gold/finance.duckdb
+  read_only: true

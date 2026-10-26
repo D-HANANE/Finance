@@ -1,0 +1,38 @@
+version: 2
+models:
+  - name: stg_candles
+    description: Une action sur une minute UTC finalisée depuis un snapshot Iceberg.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: minute_start
+        tests: [not_null]
+      - name: minute_end
+        tests: [not_null]
+      - name: open
+        tests: [not_null]
+      - name: high
+        tests: [not_null]
+      - name: low
+        tests: [not_null]
+      - name: close
+        tests: [not_null]
+      - name: volume
+        tests: [not_null]
+      - name: notional
+        tests: [not_null]
+      - name: trade_count
+        tests: [not_null]
+  - name: gold_daily
+    description: Une action et un jour UTC ; journée courante partielle.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: day
+        tests: [not_null]
+  - name: gold_minute
+    description: Une action et une minute finalisée ; moyennes de 20 et 50 minutes observées.
+  - name: gold_correlations
+    description: Une paire non ordonnée sur les minutes communes de tout l'historique disponible.
+  - name: gold_alerts
+    description: Un symbole et un créneau de cinq minutes où une alerte est déclenchée.

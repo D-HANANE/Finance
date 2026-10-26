@@ -1,0 +1,19 @@
+checks for stg_candles:
+  - row_count > 0
+  - missing_count(symbol) = 0
+  - missing_count(minute_start) = 0
+  - missing_count(minute_end) = 0
+  - missing_count(open) = 0
+  - missing_count(high) = 0
+  - missing_count(low) = 0
+  - missing_count(close) = 0
+  - missing_count(volume) = 0
+  - missing_count(notional) = 0
+  - missing_count(trade_count) = 0
+  - duplicate_count(symbol, minute_start) = 0
+  - freshness(minute_end) < 10m
+  - failed rows:
+      name: OHLCV coherence
+      fail query: |
+        SELECT * FROM stg_candles WHERE low>open OR open>high
+        OR low>close OR close>high OR volume<0 OR trade_count<=0

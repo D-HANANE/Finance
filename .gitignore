@@ -3,3 +3,9 @@
 __pycache__/
 *.pyc
 checkpoints/
+dbt/target/
+dbt/logs/
+artifacts/
+.pytest_cache/
+.soda-venv/
+spark-warehouse/

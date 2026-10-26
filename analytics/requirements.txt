@@ -1,0 +1,12 @@
+dbt-core==1.9.2
+dbt-duckdb==1.9.2
+duckdb==1.0.0
+dagster==1.9.13
+dagster-webserver==1.9.13
+psycopg2-binary==2.9.10
+pyarrow==18.1.0
+dbt-common==1.15.0
+dbt-adapters==1.14.1
+pydantic==2.10.6
+protobuf==5.29.3
+SQLAlchemy==2.0.38

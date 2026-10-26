@@ -1,0 +1,9 @@
+finance:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', '/gold/finance.duckdb') }}"
+      threads: 2
+      settings:
+        TimeZone: UTC

@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: Finance PostgreSQL
+    uid: finance-pg
+    type: postgres
+    url: postgres:5432
+    user: finance
+    isDefault: true
+    jsonData:
+      database: finance
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: $POSTGRES_PASSWORD

@@ -11,6 +11,7 @@ x-app: &app
     AWS_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?Configurer .env}
     AWS_DEFAULT_REGION: us-east-1
     BRONZE_BUCKET: bronze
+    PG_DSN: postgresql://finance:${POSTGRES_PASSWORD:-local_demo_change_me}@postgres:5432/finance
 
 services:
   kafka:
@@ -46,9 +47,10 @@ services:
       retries: 18
       start_period: 20s
     restart: unless-stopped
+    mem_limit: 768m
 
   minio:
-    image: docker.io/pgsty/silo:latest
+    image: pgsty/silo@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${S3_ROOT_USER:?Configurer .env}
@@ -59,6 +61,7 @@ services:
     volumes:
       - minio_data:/data
     restart: unless-stopped
+    mem_limit: 512m
 
   init:
     <<: *app
@@ -82,6 +85,7 @@ services:
         condition: service_completed_successfully
     restart: on-failure
     stop_grace_period: 30s
+    mem_limit: 128m
 
   consumer-bronze:
     <<: *app
@@ -96,7 +100,151 @@ services:
         condition: service_completed_successfully
     restart: on-failure
     stop_grace_period: 60s
+    mem_limit: 256m
+
+  postgres:
+    image: postgres:16.8-bookworm
+    environment:
+      POSTGRES_DB: finance
+      POSTGRES_USER: finance
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_demo_change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/001-init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance -d finance"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 512m
+    restart: unless-stopped
+
+  metastore:
+    build:
+      context: .
+      dockerfile: hive/Dockerfile
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ROOT_USER:?Configurer .env}
+      AWS_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?Configurer .env}
+      SERVICE_OPTS: >-
+        -Xmx512m
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=finance
+        -Djavax.jdo.option.ConnectionPassword=${POSTGRES_PASSWORD:-local_demo_change_me}
+        -Dhive.metastore.warehouse.dir=file:///tmp/hive-warehouse
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9083'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    mem_limit: 1g
+    restart: on-failure
+
+  spark:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    environment:
+      <<: *app-env
+      TZ: UTC
+      SPARK_MAX_OFFSETS: ${SPARK_MAX_OFFSETS:-50000}
+    volumes:
+      - spark_state:/state
+      - exchange:/exchange
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      metastore:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import pathlib,time; p=pathlib.Path('/state/heartbeat'); assert p.exists() and time.time()-p.stat().st_mtime<90"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    mem_limit: 3g
+    restart: on-failure
+    stop_grace_period: 60s
+
+  dagster:
+    build:
+      context: .
+      dockerfile: analytics/Dockerfile
+    environment:
+      <<: *app-env
+    volumes:
+      - exchange:/exchange:ro
+      - gold_data:/gold
+      - dagster_data:/dagster
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/server_info')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 90s
+      retries: 5
+    mem_limit: 1536m
+    restart: on-failure
+
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-local_demo_change_me}
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 5s
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_DISABLE_PLUGINS: grafana-lokiexplore-app,grafana-pyroscope-app,grafana-exploretraces-app,grafana-metricsdrilldown-app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_demo_change_me}
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
+    environment:
+      <<: *app-env
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    restart: on-failure
 
 volumes:
   kafka_data:
   minio_data:
+  postgres_data:
+  spark_state:
+  exchange:
+  gold_data:
+  dagster_data:
+  grafana_data:

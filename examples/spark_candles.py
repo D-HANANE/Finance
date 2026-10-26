@@ -1,4 +1,4 @@
-"""À intégrer dans le job Spark existant ; ne déploie pas le catalogue Iceberg.
+"""Exemple pédagogique ; le service complet se trouve dans spark/streaming.py.
 
 Le connecteur spark-sql-kafka doit correspondre à la version Spark/Scala.
 La session Spark doit utiliser UTC. Les sorties en mode update nécessitent
@@ -13,6 +13,7 @@ def build_candles(spark, bootstrap="kafka:29092"):
         T.StructField("trade_id", T.StringType()),
         T.StructField("symbol", T.StringType()),
         T.StructField("price", T.DecimalType(18, 4)),
+        T.StructField("quantity", T.LongType()),
         T.StructField("volume", T.LongType()),
         T.StructField("event_time", T.StringType()),
     ])
@@ -23,11 +24,12 @@ def build_candles(spark, bootstrap="kafka:29092"):
              .load())
     trades = (kafka.select(F.from_json(F.col("value").cast("string"), schema).alias("t"))
               .select("t.*")
-              .withColumn("event_time", F.to_timestamp("event_time")))
+              .withColumn("event_time", F.to_timestamp("event_time"))
+              .withColumn("quantity", F.coalesce("quantity", "volume")).drop("volume"))
     valid = trades.filter(
         F.col("trade_id").isNotNull() & F.col("symbol").isNotNull()
         & F.col("event_time").isNotNull()
-        & (F.col("price") > 0) & (F.col("volume") >= 0)
+        & (F.col("price") > 0) & (F.col("quantity") > 0)
     )
     # Ordre métier par heure d'événement ; trade_id départage les égalités.
     order = F.struct(F.col("event_time"), F.col("trade_id"))
@@ -37,8 +39,8 @@ def build_candles(spark, bootstrap="kafka:29092"):
                     F.max("price").alias("high"),
                     F.min("price").alias("low"),
                     F.max_by("price", order).alias("close"),
-                    F.sum("volume").alias("volume"),
-                    F.sum(F.col("price") * F.col("volume")).alias("notional"),
+                    F.sum("quantity").alias("volume"),
+                    F.sum(F.col("price") * F.col("quantity")).alias("notional"),
                     F.count("*").alias("trade_count"))
                .select("symbol", F.col("window.start").alias("minute_start"),
                        F.col("window.end").alias("minute_end"),

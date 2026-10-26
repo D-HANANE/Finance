@@ -1,202 +1,134 @@
-# Marché financier — ingestion Kafka vers Bronze
+# Plateforme de marché financier simulé
 
-Ce socle remplace l'ingestion directe par un producteur Kafka et un consommateur
-Bronze. Il prépare FIN-01 et FIN-02 et l'archivage des transactions pour FIN-04.
-La conformité au débit se vérifie sur les confirmations Kafka dans les logs.
-Il ne constitue pas à lui seul la plateforme financière complète : les sorties
-Iceberg/PostgreSQL, dbt/Soda, Dagster, Grafana et Streamlit restent à intégrer.
+Sujet 4, octobre 2026. Membres du groupe : à renseigner par les auteurs.
+20 symboles d'entreprises réelles ; tous les prix et échanges sont simulés.
+Aucun indicateur ne prédit les cours. Les symboles réels sont une adaptation
+explicitement demandée du sujet, qui emploie des actions fictives.
 
-## Démarrage Windows PowerShell
+## Démarrage Windows
 
-Extraire le dossier `finance-kafka-bronze` depuis le ZIP vers `C:\`.
-Docker Desktop doit être démarré en mode conteneurs Linux. Si le TP1 utilise
-encore les ports 9000, 9001 et 9092, arrêter sa pile depuis son dossier avec
-`docker compose stop`, ou choisir d'autres ports dans le nouveau `.env`.
-Les services de cette base ont leurs propres volumes ; les données du TP1
-ne sont pas importées ni supprimées.
-
-Exécuter ces commandes dans PowerShell :
+Prérequis : Docker Desktop démarré en mode Linux, 16 Go de RAM physique,
+au moins 8 Go attribués à Docker, 15 Go de disque disponible. Dans ce dossier :
 
 ```powershell
-cd C:\finance-kafka-bronze
-Copy-Item .env.example .env
-notepad .env
+Copy-Item .env.example .env  # seulement si .env n'existe pas encore
 docker compose up -d --build
 ```
 
-Dans le Bloc-notes, personnaliser le nom d'utilisateur et le mot de passe S3,
-puis enregistrer avant la dernière commande. Aucun environnement Python local
-n'est nécessaire : les scripts tournent dans Docker.
+Deux commandes suffisent. Les valeurs de `.env.example` sont des identifiants
+locaux de démonstration ; les personnaliser dans `.env`, ignoré par Git.
+La première construction télécharge des images volumineuses. Moins de cinq
+commandes ne signifie pas cinq minutes. Ensuite : `docker compose up -d`.
+Les anciens événements Bronze/Kafka avec `volume` sont acceptés : ce champ
+historique désigne une quantité. Le générateur utilise maintenant `quantity`.
 
-La cible est 220 transactions/s au total, afin de garder une marge sur le
-minimum de 200/s. Les 20 actions sont FIN01 à FIN20. Le topic `trades`, avec
-6 partitions, et les buckets Bronze/Silver/Gold sont créés automatiquement.
-Un conteneur `init` terminé avec le code 0 est normal.
+| Interface | Adresse | Accès |
+|---|---|---|
+| Streamlit | http://localhost:8501 | Analyses et alertes |
+| Grafana | http://localhost:3001/d/finance-live | admin / GRAFANA_PASSWORD |
+| Dagster | http://localhost:3000 | Tâches et historique |
+| MinIO | http://localhost:9001 | S3_ROOT_USER / S3_ROOT_PASSWORD |
+
+`init` terminé avec code 0 est normal. Spark attend le catalogue. PostgreSQL
+reçoit les chandeliers provisoires après les premiers micro-lots. Silver attend
+le watermark. Gold attend une exécution Dagster, planifiée toutes les cinq
+minutes. MA20 et MA50 nécessitent 20 et 50 minutes observées. Le rendement
+quotidien exige une clôture la veille. Aucun faux historique n'est injecté.
+
+## Architecture
+
+```mermaid
+flowchart LR
+ P[Python 220 échanges/s] --> K[Kafka trades · 6 partitions]
+ K --> B[Consommateur Bronze]
+ B --> M[MinIO JSONL et Parquet]
+ K --> V[Spark validation et déduplication]
+ V --> S[Parquet intermédiaire persistant]
+ S --> L[Spark fenêtres update]
+ L --> PG[PostgreSQL provisoire et alertes]
+ S --> F[Spark fenêtres finalisées]
+ F --> I[Iceberg Silver dans MinIO]
+ F --> PG
+ H[Hive Metastore] --- I
+ I --> E[Snapshot exporté automatiquement]
+ E --> D[Dagster · dbt DuckDB · Soda]
+ D --> G[Gold validé dans PostgreSQL]
+ PG --> GR[Grafana 5s]
+ PG --> ST[Streamlit 5s]
+ G --> ST
+```
+
+Les tâches planifiées ne commandent ni le générateur, ni Kafka, ni Spark.
+Voir [architecture](docs/ARCHITECTURE.md), [dictionnaire](docs/DATA_DICTIONARY.md),
+[couverture](docs/COVERAGE.md), [validation](VALIDATION.md),
+[démonstration de 7 minutes](docs/DEMO.md) et [licences](docs/LICENSES.md).
+Le [rapport PDF de 12 pages](output/pdf/rapport_plateforme_financiere.pdf) dispose
+de sa [source Markdown](docs/REPORT.md). Les captures réelles sont dans
+[docs/evidence](docs/evidence).
 
 ## Contrôles
 
 ```powershell
 docker compose ps -a
-docker compose logs -f producer consumer-bronze
-```
-
-`Ctrl+C` ferme le suivi des logs ; les services continuent à tourner.
-Tous les cinq secondes, le producteur affiche `confirme=.../s` et
-`symboles_confirmes=20`. Le compteur confirme les livraisons acquittées par
-Kafka, pas seulement les demandes d'envoi. Après le démarrage, observer
-plusieurs fenêtres consécutives avec au moins 200/s et sans erreurs ; le
-premier intervalle peut être plus faible. Un message `SOUS_200` signale que
-l'exigence n'est pas atteinte pendant cet intervalle. Le débit réel dépend
-de la machine ; il n'est pas garanti par la seule configuration.
-
-Le consommateur affiche `BRONZE lignes=...` après environ 30 secondes, ou
-10 000 messages. Il reste actif et n'a aucune limite de 40 objets.
-
-Décrire le topic :
-
-```powershell
+docker compose logs --tail 20 producer consumer-bronze spark
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe --topic trades
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic trades --max-messages 5 --property print.key=true --property print.partition=true
+docker compose exec postgres psql -U finance -d finance -c "SELECT symbol,count(*),count(*) FILTER (WHERE is_final) finalized FROM candles GROUP BY symbol ORDER BY symbol;"
+docker compose exec dagster python gold.py
+docker compose run --rm --no-deps -v "${PWD}/scripts:/checks:ro" producer python /checks/verify_runtime.py
 ```
 
-Afficher cinq messages avec leurs clés et partitions (groupe indépendant) :
+Le débit obligatoire est celui des confirmations Kafka : `DEBIT confirme=.../s`
+doit atteindre 200/s sur plusieurs fenêtres après chauffe. Le script échantillonne
+la réception, les clés, les symboles, les partitions et un lot Bronze complet.
+Un choc de +8 % sur AAPL intervient après 360 secondes du producteur, puis
+chaque 300 secondes. La ligne détectée dans Streamlit constitue la preuve
+d'alerte ; le log CHOC prouve seulement l'injection.
+
+## Tests sans infrastructure externe
 
 ```powershell
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 --topic trades --from-beginning --max-messages 5 --property print.key=true --property print.partition=true
+docker compose run --rm --no-deps -v "${PWD}/tests:/tests:ro" producer python -m unittest discover -s /tests -v
+docker compose run --rm --no-deps -v "${PWD}/scripts:/checks:ro" dagster python /checks/test_gold.py
+docker compose run --rm --no-deps --entrypoint /opt/spark/bin/spark-submit -v "${PWD}/scripts:/checks:ro" spark --master local[2] /checks/test_spark.py
+docker compose run --rm --no-deps -v "${PWD}/scripts:/checks:ro" -v "${PWD}/postgres:/schema:ro" producer python /checks/test_serving.py
 ```
 
-Consulter le retard du consommateur Bronze :
+La CI vérifie Python, Compose et Gold sur un jeu temporaire explicitement simulé.
+Elle exécute également Spark local et Soda, sans Kafka ni stockage externe.
+Elle ne certifie pas le débit ni le rendu visuel des interfaces.
+
+## Reprise
 
 ```powershell
+docker compose restart consumer-bronze spark
+docker compose logs --since 2m consumer-bronze spark
 docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:29092 --describe --group bronze-trades-writer
+docker compose stop producer
+docker compose stop
 ```
 
-## Stockage
+Les checkpoints et les volumes doivent être conservés ensemble. Après reprise,
+contrôler les clés et les volumes d'un chandelier déjà finalisé. `down` garde
+les volumes ; `down -v` les détruit. Kafka conserve 24 h ou environ 1 Gio par
+partition. Spark échoue explicitement si des offsets ont expiré. La reconstruction
+depuis Bronze nécessite un traitement séparé, non automatisé dans cette maquette.
 
-Console : http://localhost:9001, identifiants choisis dans `.env`.
+Les erreurs dbt/Soda bloquent la publication Gold. Les rejets de contrat sont
+identifiables dans `/state/rejected`, avec brut et coordonnées Kafka. Les abandons
+au-delà du watermark sont comptés dans `/state/metrics` ; leur brut reste dans
+Bronze. Les manifestes Bronze servent au vérificateur et à l'audit des offsets.
+La documentation et le lineage dbt sont générés dans `/app/dbt/target` du service
+Dagster. Ils peuvent être servis avec `dbt docs serve` dans un environnement de
+développement ; l'application de présentation reste Grafana et Streamlit.
 
-Dans le bucket `bronze` :
+## Versions
 
-- `json/trades/batch_date=YYYY-MM-DD/*.jsonl` : messages métier JSON archivés,
-  un message par ligne, sans transformation de leur contenu.
-- `parquet/trades/batch_date=YYYY-MM-DD/*.parquet` : mêmes transactions sous
-  forme tabulaire, avec coordonnées Kafka et métadonnées d'ingestion.
-- `manifests/trades/batch_date=YYYY-MM-DD/*.json` : objets et offsets d'un lot
-  dont les écritures sont terminées. Le manifeste est publié en dernier.
-
-`batch_date` est la date UTC du plus ancien événement du lot, choisie pour
-stabiliser son chemin lors d'un rejeu identique. Ce n'est pas une partition
-stricte par date de chaque ligne : un lot peut traverser minuit. La vraie
-date d'arrivée est `_ingested_at`. Chaque ligne conserve aussi `_topic`,
-`_partition`, `_offset` et `_batch_id`. `price` est un décimal (18,4),
-`event_time` un timestamp UTC à la microseconde, lisible par Spark 3.5.
-Une transaction correspond à une ligne, pas à un objet S3.
-
-Le JSONL garde le brut. Parquet prépare les relectures analytiques. CSV n'est
-pas ajouté, car il ne serait pas nécessaire à cette base finance. Si un
-consommateur strict des lots est requis, utiliser les manifestes ; un glob
-sur tous les fichiers Parquet peut aussi voir un lot sans manifeste.
-
-## Reprise et limites
-
-Les offsets sont validés après les trois écritures. La garantie est
-**at-least-once**, pas exactly-once. Une erreur arrête le consommateur ;
-Docker le redémarre et les offsets non validés sont relus. Un lot rejoué
-avec exactement les mêmes messages conserve son identifiant ; si le
-découpage des lots change au redémarrage, des doublons restent possibles.
-Les traiter en Silver par `(topic, partition, offset)` ou `trade_id`.
-Le watermark ne réalise pas à lui seul cette déduplication.
-
-Un changement de prix d'une action dans la simulation n'est pas une mise à
-jour d'une ancienne transaction : chaque `trade_id` identifie un nouvel
-échange. Ne pas dédupliquer sur `symbol`, ce qui supprimerait presque tous
-les échanges. Un choc de +8 % est injecté sur FIN01 après 360 secondes,
-puis toutes les 300 secondes. Son affichage dans les logs ne prouve pas
-encore FIN-08 : Spark et Streamlit doivent ensuite calculer et afficher
-l'alerte sur la variation réellement mesurée sur cinq minutes.
-
-Kafka conserve localement ses journaux, avec rétention configurée à 24 h
-ou environ 1 Gio par partition (selon le premier seuil atteint, avec
-nettoyage par segments). Ce n'est pas l'archive longue durée ; Bronze
-la conserve. Le stockage grandit tant que le flux tourne. Pour arrêter
-les événements, utiliser `docker compose stop producer`, attendre que
-le retard Bronze revienne à zéro, puis `docker compose stop`.
-Ne pas utiliser `docker compose down -v` si les volumes doivent être gardés.
-Cette configuration mono-broker, sans TLS, est une maquette locale.
-L'image SILO reprend celle utilisée dans les TP ; son tag `latest` devra
-être figé par digest après validation pour une exécution reproductible.
-
-## Raccordement à Spark et au reste du projet
-
-| Client | Adresse Kafka |
-|---|---|
-| Scripts et Spark dans ce même réseau Compose | `kafka:29092` |
-| Script ou Spark sur Windows hôte | `localhost:9092` |
-| Spark dans une VM Ubuntu distincte | IP de l'hôte à configurer comme adresse annoncée, à la place de localhost |
-
-Pour un Spark déjà dans un autre Compose, fusionner les services dans le
-Compose du projet ou relier explicitement les réseaux. `kafka:29092` n'est
-résolu que dans le réseau Docker partagé. Si un MinIO de projet existe,
-réutiliser ce service et ses identifiants ; ne pas lancer un deuxième service
-sur les mêmes ports. Ne pas remplacer le Compose complet existant par celui-ci.
-
-`examples/spark_candles.py` fournit `build_candles(spark, bootstrap)` pour
-préparer les chandeliers d'une minute, avec un watermark de deux minutes.
-Le connecteur `org.apache.spark:spark-sql-kafka-0-10_2.12:<version Spark>` doit
-être chargé avant de créer la session (par exemple 3.5.5 pour Spark 3.5.5 et
-Scala 2.12). Adapter le suffixe Scala à l'installation réelle.
-
-Exemple dans le job/notebook existant, depuis la racine du projet :
-
-```python
-from examples.spark_candles import build_candles
-
-candles = build_candles(spark, bootstrap="kafka:29092")
-query = (candles.writeStream.outputMode("update")
-         .format("console").option("truncate", False)
-         .option("checkpointLocation", "/chemin/persistant/checkpoints/candles-console")
-         .trigger(processingTime="5 seconds").start())
-# Après observation : query.stop()
-```
-
-Cet exemple calcule et affiche des chandeliers ; il n'écrit pas encore
-dans Iceberg ou PostgreSQL. Pour PostgreSQL en direct, faire un upsert
-par `(symbol, minute_start)` à chaque micro-lot. Pour Iceberg : soit
-un `MERGE` de ces mises à jour, soit un flux append de fenêtres finalisées
-après passage du watermark. Un append des sorties update créerait des
-doublons. Donner à chaque requête un checkpoint persistant distinct.
-
-Les prix open/close suivent l'heure d'événement, départagée par trade_id,
-et non l'ordre d'arrivée Spark. `notional = somme(price * volume)` est
-conservé pour un VWAP exact par `somme(notional) / somme(volume)`.
-Spark lit `trades` indépendamment du groupe Bronze et suit ses offsets
-dans son checkpoint : ne pas lui imposer le groupe `bronze-trades-writer`.
-Hive Metastore référence ensuite les tables Iceberg ; il ne remplace ni
-Kafka ni le stockage des transactions.
-
-FIN-03 à FIN-08 restent à intégrer et à vérifier dans la plateforme :
-Silver Iceberg, base PostgreSQL, indicateurs Gold dbt/DuckDB, contrôles
-Soda, planification Dagster, Grafana et alertes Streamlit.
-
-## Tests
-
-Sans dépendances, les tests du générateur fonctionnent et le test Parquet
-est ignoré explicitement. Dans l'image Python, exécuter tous les tests :
-
-```powershell
-docker compose run --rm -v "${PWD}/tests:/app/tests:ro" --no-deps producer python -m unittest discover -s tests -v
-```
-
-Ou, avec Python 3.12 local et les dépendances installées :
-
-```powershell
-python -m pip install -r requirements.txt
-python -m unittest discover -s tests -v
-```
-
-Ces tests ne constituent pas une mesure du débit ni une validation de
-l'ensemble Docker. Vérifier aussi les logs et les objets dans MinIO.
-
-Références techniques :
-- https://kafka.apache.org/38/getting-started/docker/
-- https://docs.confluent.io/platform/current/clients/confluent-kafka-python/html/index.html
-- https://spark.apache.org/docs/3.5.6/structured-streaming-kafka-integration.html
+Kafka 3.8.0 ; Spark 3.5.5, Scala 2.12, Java 11 ; Iceberg 1.7.2 avec AWS bundle
+1.7.2 et S3FileIO ; Hive 4.0.0 ; PostgreSQL 16.8 ; MinIO compatible S3
+(pgsty/silo figé par digest) ; dbt Core/dbt-duckdb 1.9.2 ; DuckDB 1.0.0 ;
+Soda Core 3.5.6 ; Dagster 1.9.13 ; Grafana OSS 11.6.0 ; Streamlit 1.43.2.
+Le connecteur Kafka correspond exactement à Spark et Scala. Les dépendances Java
+sont résolues à la construction. Aucun téléchargement manuel dans les conteneurs.
+Les tags sont explicites, mais les transitives ne sont pas encore verrouillées
+par hash. Cette pile mono-broker est une maquette locale.

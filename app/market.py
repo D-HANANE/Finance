@@ -49,6 +49,6 @@ class Market:
             "trade_id": uuid.uuid4().hex,
             "symbol": symbol,
             "price": round(self.prices[symbol], 4),
-            "volume": self.rng.randint(1, 100),
+            "quantity": self.rng.randint(1, 100),
             "event_time": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
         }

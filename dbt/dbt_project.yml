@@ -1,0 +1,9 @@
+name: finance
+version: '1.0.0'
+config-version: 2
+profile: finance
+model-paths: [models]
+test-paths: [tests]
+models:
+  finance:
+    +materialized: table
