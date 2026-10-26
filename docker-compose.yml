@@ -75,6 +75,22 @@ services:
       - minio_data:/data
     restart: unless-stopped
 
+  # Persistent JDBC catalog for Iceberg metadata. Iceberg data files remain in S3/MinIO.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: iceberg_catalog
+      POSTGRES_USER: ${ICEBERG_JDBC_USER:-iceberg}
+      POSTGRES_PASSWORD: ${ICEBERG_JDBC_PASSWORD:?Configurer .env avec un mot de passe de catalogue}
+    volumes:
+      - iceberg_catalog_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
   init:
     <<: *app
     command: ["python", "init_services.py"]
@@ -112,6 +128,35 @@ services:
     restart: on-failure
     stop_grace_period: 60s
 
+  consumer-silver:
+    build:
+      context: .
+      dockerfile: Dockerfile.silver
+    image: finance-market-silver:local
+    command: ["python", "consumer_silver.py"]
+    environment:
+      <<: *app-env
+      ICEBERG_VERSION: ${ICEBERG_VERSION:-1.12.0}
+      ICEBERG_JDBC_URI: ${ICEBERG_JDBC_URI:-jdbc:postgresql://postgres:5432/iceberg_catalog}
+      ICEBERG_JDBC_USER: ${ICEBERG_JDBC_USER:-iceberg}
+      ICEBERG_JDBC_PASSWORD: ${ICEBERG_JDBC_PASSWORD:?Configurer .env avec un mot de passe de catalogue}
+      SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-6}
+      SPARK_LOG_LEVEL: ${SPARK_LOG_LEVEL:-WARN}
+      WATERMARK_DELAY: "${WATERMARK_DELAY:-2 minutes}"
+      SILVER_TRIGGER_INTERVAL: "${SILVER_TRIGGER_INTERVAL:-60 seconds}"
+      SILVER_CHECKPOINT_LOCATION: ${SILVER_CHECKPOINT_LOCATION:-s3a://silver/checkpoints/ohlc_1m}
+      KAFKA_STARTING_OFFSETS: ${KAFKA_STARTING_OFFSETS:-earliest}
+      KAFKA_MAX_OFFSETS_PER_TRIGGER: ${KAFKA_MAX_OFFSETS_PER_TRIGGER:-50000}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    stop_grace_period: 60s
+
 volumes:
   kafka_data:
   minio_data:
+  iceberg_catalog_data:
