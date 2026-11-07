@@ -45,11 +45,11 @@ table = pq.read_table(io.BytesIO(s3.get_object(Bucket='bronze',Key=manifest['par
 assert table.num_rows==manifest['row_count']
 print('Bronze manifest and Parquet rows:',table.num_rows)
 with psycopg2.connect(os.environ['PG_DSN']) as connection,connection.cursor() as cursor:
-    for name in ('candles','latest_prices','alerts','gold_daily','pipeline_runs'):
+    for name in ('candles','latest_prices','alerts','alert_history','lakehouse_files','lakehouse_runs'):
         cursor.execute(f'SELECT count(*) FROM {name}')
         print(name,cursor.fetchone()[0])
     cursor.execute('SELECT count(*) FROM candles WHERE is_final')
-    assert cursor.fetchone()[0]>0,'No finalized Silver candles published'
+    assert cursor.fetchone()[0]>0,'No finalized streaming candles published'
     cursor.execute('SELECT count(*) FROM candles WHERE low>open OR open>high OR low>close OR close>high OR volume<0')
     assert cursor.fetchone()[0]==0
 print('Runtime sampling passed; Kafka delivery rate must ALSO be checked in producer logs.')

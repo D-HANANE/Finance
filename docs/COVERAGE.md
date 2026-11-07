@@ -1,24 +1,25 @@
-# Couverture du cahier des charges
+# Couverture de la nouvelle architecture
 
-Implémenté décrit le code. VALIDATION.md atteste uniquement les contrôles exécutés.
+Les précisions utilisateur du 4 novembre remplacent l'ancien Gold dbt/DuckDB actif et
+le catalogue précédent. Les intervalles et seuils du cahier Word restent inchangés.
 
-| Réf. | Type | Implémentation | Vérification | Statut |
-|---|---|---|---|---|
-| FIN-01 | OBL | market.py, producer.py, cible 220/s | 20 symboles ; confirmations Kafka >=200/s | Vérifié : environ 220/s, zéro erreur |
-| FIN-02 | OBL | clé symbole, init topic 6 partitions | describe et verify_runtime.py | Vérifié : six partitions et clés correctes |
-| FIN-03 | OBL | spark/streaming.py, watermark et 4 checkpoints | test_spark.py, métriques, redémarrage | Vérifié : OHLCV connu, retards, doublons, checkpoints |
-| FIN-04 | OBL | lake.finance.candles, Hive, S3 | verify_iceberg.py et check_restart.py | Vérifié : 380 lignes concordent, snapshot lisible, reprise stable |
-| FIN-05 | OBL | modèles dbt minute et quotidien | test_gold.py et run Dagster réel | Vérifié : formules et publication Gold |
-| FIN-06 | OBL | contraintes SQL, dbt, Soda | 15 tests dbt, 14 contrôles Soda, échec injecté | Vérifié : succès nominal et échec attendu |
-| FIN-07 | OBL | 3 panneaux Grafana, refresh 5s | docs/evidence/grafana.png, verify_ui.cjs | Vérifié dans un navigateur |
-| FIN-08 | OBL | serving.py, UI, choc AAPL | docs/evidence/streamlit-alerts.png ; +8,762 % détecté | Vérifié : ligne réelle et affichage |
-| FIN-09 | OPT | Pas de mesure jusqu'au rendu client | Aucune latence graphique revendiquée | Non réalisé |
-| FIN-10 | OPT | PostgreSQL retenu | Pas de benchmark ClickHouse revendiqué | Non réalisé |
-| Commun | OBL | Compose, volumes, init, healthchecks | commande README exécutée | Vérifié sur la machine cible |
-| Commun | OBL | Dagster, 2 schedules, retries | chargement et run réel, run planifié | Vérifié ; horaire 00:05 non attendu |
-| Commun | OBL | GitHub Actions, tests | workflow versionné | Configuré ; aucun run GitHub revendiqué |
-| Commun | OBL | README, architecture, dictionnaire, rapport, démo | fichiers du dépôt | Préparés |
+| Exigence | Implémentation | Preuve exécutée / statut |
+|---|---|---|
+| Producer et Kafka conservés | app/market.py, producer.py, topic trades | Débit confirmé et vingt symboles |
+| Streaming OHLCV une minute | spark/streaming.py | Test Spark réel et PostgreSQL |
+| PostgreSQL sans doublons | app/serving.py, contraintes | test_serving.py |
+| Grafana trois actions, 5s | provisioning et dashboard existants | Contrôle navigateur |
+| Bronze préservé | storage.py et consumer_bronze.py inchangés | Archives et test_pipeline.py |
+| Silver depuis Bronze | spark/lakehouse.py, manifestes et canonique | Job réel, registres, tables |
+| Gold Spark SQL Iceberg | MINUTE_SQL, daily, corrélations | test_gold_spark.py et job réel |
+| Catalogue sans Hive | spark/catalog.py, JDBC PostgreSQL | ICEBERG_V2_OK : nouveau processus, snapshots et tables relus |
+| Alertes PostgreSQL uniquement | app/alerting.py, postgres/002-lakehouse.sql | test_alerts_v2.py, aucune table Iceberg d'alertes |
+| Évaluation toutes les 5 min | Schedule lakehouse_and_alerts_every_five_minutes | Définitions et run Dagster |
+| Statuts et historique | active/resolved/closed, UUID, empreintes | Tests de cycle de vie et Streamlit |
+| Corrections tardives | Dirty minutes et metric_updated_at | Tests SQL isolés, rejeu réel sans doublons |
+| Exécutions indépendantes | Jobs streaming_supervision et lakehouse_refresh | Deux arrêts séparés vérifiés ; run b1eff61b réussi sans streaming |
+| Contrôles de qualité | Contrat, contraintes et contrôles SQL Spark | Tests nominal et invalide |
+| CI | .github/workflows/ci.yml | Configurée, run GitHub non revendiqué |
 
-Les noms d'actions réelles sont une adaptation demandée : le sujet dit actions
-fictives. Le caractère simulé est indiqué partout. La bibliothèque standard
-réalise la marche aléatoire, sans dépendance numpy superflue.
+Les résultats effectivement exécutés, avec nombres et limites, sont dans VALIDATION.md.
+Les bonus FIN-09/10 restent non réalisés.

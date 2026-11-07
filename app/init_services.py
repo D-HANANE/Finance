@@ -8,6 +8,10 @@ from storage import connect_s3
 
 
 def main():
+    from pathlib import Path
+    from serving import connect
+    with connect() as pg, pg.cursor() as cursor:
+        cursor.execute(Path('/app/postgres/002-lakehouse.sql').read_text())
     s3 = connect_s3()
     for attempt in range(60):
         try:

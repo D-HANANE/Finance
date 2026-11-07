@@ -1,7 +1,8 @@
 """Separate durable queries avoid chaining two stateful operators in update mode."""
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
-import shutil
 import time
 from pathlib import Path
 
@@ -10,8 +11,7 @@ from pyspark.sql.streaming import StreamingQueryListener
 from market import SYMBOLS
 from serving import publish_candles
 
-STATE = os.getenv('STATE_DIR', '/state')
-EXCHANGE = Path(os.getenv('EXCHANGE_DIR', '/exchange'))
+STATE = os.getenv('STATE_DIR', '/state') + '/v2'
 WATERMARK = '2 minutes'
 
 
@@ -33,26 +33,8 @@ class Metrics(StreamingQueryListener):
 
 
 def session():
-    builder = (SparkSession.builder.appName('finance-streaming')
-               .config('spark.sql.session.timeZone', 'UTC')
-               .config('spark.sql.extensions', 'org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions'))
-    conf = {
-        'spark.sql.catalog.lake': 'org.apache.iceberg.spark.SparkCatalog',
-        'spark.sql.catalog.lake.type': 'hive',
-        'spark.sql.catalog.lake.uri': 'thrift://metastore:9083',
-        'spark.sql.catalog.lake.warehouse': 's3://silver/warehouse',
-        'spark.sql.catalog.lake.io-impl': 'org.apache.iceberg.aws.s3.S3FileIO',
-        'spark.sql.catalog.lake.s3.endpoint': os.environ['S3_ENDPOINT'],
-        'spark.sql.catalog.lake.s3.path-style-access': 'true',
-        'spark.sql.catalog.lake.s3.access-key-id': os.environ['AWS_ACCESS_KEY_ID'],
-        'spark.sql.catalog.lake.s3.secret-access-key': os.environ['AWS_SECRET_ACCESS_KEY'],
-        'spark.sql.catalog.lake.client.region': 'us-east-1',
-        # HMS only holds pointers. Iceberg owns data paths and writes via AWS SDK v2.
-        'spark.hadoop.hive.metastore.client.capability.check': 'false',
-    }
-    for key, value in conf.items():
-        builder = builder.config(key, value)
-    return builder.getOrCreate()
+    return (SparkSession.builder.appName('finance-streaming')
+            .config('spark.sql.session.timeZone','UTC').getOrCreate())
 
 
 def parse(kafka):
@@ -92,38 +74,13 @@ def aggregate(valid):
                     'volume', 'notional', 'trade_count', 'last_event_time', 'last_trade_id'))
 
 
-def export_snapshot(spark, batch_id):
-    """Read Iceberg, never a glob of its underlying Parquet data files."""
-    generation = f'silver-{batch_id}-{time.time_ns()}'
-    target = EXCHANGE / generation
-    spark.table('lake.finance.candles').coalesce(1).write.parquet(str(target))
-    parquet = next(target.glob('part-*.parquet'))
-    pointer = EXCHANGE / 'silver.json.tmp'
-    pointer.write_text(json.dumps({'path': str(parquet), 'batch_id': batch_id,
-                                   'exported_at': time.time()}))
-    pointer.replace(EXCHANGE / 'silver.json')
-    # Keep recent generations to allow readers to finish an in-flight dbt build.
-    for folder in EXCHANGE.glob('silver-*'):
-        if folder != target and time.time() - folder.stat().st_mtime > 86400:
-            shutil.rmtree(folder)
-
 
 def main():
+    Path(STATE).mkdir(parents=True,exist_ok=True)
     Path(STATE, 'heartbeat').unlink(missing_ok=True)
     spark = session()
     spark.sparkContext.setLogLevel('WARN')
     spark.streams.addListener(Metrics())
-    # Hive 4 creates namespace directories itself. Keep that administrative path
-    # local to HMS; the Iceberg table below has its own explicit S3 location.
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS lake.finance LOCATION 'file:///tmp/finance-namespace'")
-    spark.sql('''CREATE TABLE IF NOT EXISTS lake.finance.candles (
-      symbol STRING, minute_start TIMESTAMP, minute_end TIMESTAMP,
-      open DECIMAL(18,4), high DECIMAL(18,4), low DECIMAL(18,4), close DECIMAL(18,4),
-      volume BIGINT, notional DECIMAL(38,4), trade_count BIGINT,
-      last_event_time TIMESTAMP, last_trade_id STRING)
-      USING iceberg PARTITIONED BY (days(minute_start))
-      LOCATION 's3://silver/warehouse/finance/candles'
-      TBLPROPERTIES ('format-version'='2')''')
     raw = (spark.readStream.format('kafka')
            .option('kafka.bootstrap.servers', os.environ['KAFKA_BOOTSTRAP_SERVERS'])
            .option('subscribe', 'trades').option('startingOffsets', 'earliest')
@@ -148,26 +105,25 @@ def main():
         publish_candles([r.asDict() for r in batch.collect()], finalized=False)
 
     def finalized(batch, batch_id):
-        batch.persist()
-        try:
-            if batch.isEmpty():
-                return
-            batch_spark = batch.sparkSession
-            batch.createOrReplaceTempView('final_candles')
-            batch_spark.sql('''MERGE INTO lake.finance.candles t USING final_candles s
-                      ON t.symbol=s.symbol AND t.minute_start=s.minute_start
-                      WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *''')
-            publish_candles([r.asDict() for r in batch.collect()], finalized=True)
-            export_snapshot(batch_spark, batch_id)
-        finally:
-            batch.unpersist()
+        publish_candles([r.asDict() for r in batch.collect()], finalized=True)
 
     queries.append(aggregate(validated).writeStream.queryName('live').outputMode('update').foreachBatch(live)
                    .option('checkpointLocation', f'{STATE}/checkpoints/live')
                    .trigger(processingTime='5 seconds').start())
-    queries.append(aggregate(validated).writeStream.queryName('silver').outputMode('append').foreachBatch(finalized)
-                   .option('checkpointLocation', f'{STATE}/checkpoints/silver')
+    queries.append(aggregate(validated).writeStream.queryName('final-postgres').outputMode('append').foreachBatch(finalized)
+                   .option('checkpointLocation', f'{STATE}/checkpoints/final-postgres')
                    .trigger(processingTime='10 seconds').start())
+    class Health(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_GET(self):
+            active=all(q.isActive and q.exception() is None for q in queries)
+            body=json.dumps({'active':active,'queries':[q.name for q in queries]}).encode()
+            self.send_response(200 if active else 503)
+            self.send_header('Content-Type','application/json')
+            self.end_headers()
+            self.wfile.write(body)
+    server=ThreadingHTTPServer(('0.0.0.0',8091),Health)
+    threading.Thread(target=server.serve_forever,daemon=True).start()
     Path(STATE, 'started').touch()
     while True:
         for query in queries:

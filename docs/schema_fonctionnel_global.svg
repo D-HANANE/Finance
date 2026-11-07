@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1130" viewBox="0 0 1800 1130">
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M0,0 L12,6 L0,12 Z" fill="#475569"/></marker>
+    <style>
+      .title{font-family:Arial,sans-serif;font-size:35px;font-weight:700;fill:#102a43}.subtitle{font-family:Arial,sans-serif;font-size:18px;fill:#486581}.section{font-family:Arial,sans-serif;font-size:24px;font-weight:700;fill:#102a43}.boxTitle{font-family:Arial,sans-serif;font-size:22px;font-weight:700;fill:#102a43;text-anchor:middle}.boxText{font-family:Arial,sans-serif;font-size:16px;fill:#243b53;text-anchor:middle}.small{font-family:Arial,sans-serif;font-size:15px;fill:#334e68;text-anchor:middle}.label{font-family:Arial,sans-serif;font-size:15px;font-weight:700;fill:#334e68;text-anchor:middle}.line{stroke:#475569;stroke-width:3;fill:none;marker-end:url(#arrow)}.dash{stroke:#64748b;stroke-width:3;fill:none;stroke-dasharray:10 8;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1800" height="1130" fill="#f8fafc"/>
+  <text x="80" y="65" class="title">Plateforme Big Data — Marché financier : fonctionnement complet</text>
+  <text x="80" y="98" class="subtitle">Deux chaînes indépendantes, alimentées par le même Producer : temps réel et analytique Lakehouse</text>
+
+  <!-- source -->
+  <rect x="575" y="135" width="650" height="105" rx="18" fill="#e0f2fe" stroke="#0284c7" stroke-width="3"/>
+  <text x="900" y="177" class="boxTitle">Producer Python</text><text x="900" y="205" class="boxText">Génère des trades : symbole, prix, quantité, date/heure, identifiant</text>
+
+  <!-- lanes -->
+  <rect x="60" y="285" width="790" height="655" rx="24" fill="#eff6ff" stroke="#2563eb" stroke-width="3"/>
+  <text x="95" y="330" class="section">CHAÎNE 1 — Temps réel / Streaming</text>
+  <text x="95" y="358" class="subtitle">Objectif : visualiser les candlesticks immédiatement</text>
+  <rect x="950" y="285" width="790" height="655" rx="24" fill="#f0fdf4" stroke="#16a34a" stroke-width="3"/>
+  <text x="985" y="330" class="section">CHAÎNE 2 — Lakehouse / Analyse</text>
+  <text x="985" y="358" class="subtitle">Objectif : nettoyer, calculer les indicateurs et détecter les alertes</text>
+
+  <!-- streaming -->
+  <rect x="125" y="410" width="230" height="115" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/><text x="240" y="452" class="boxTitle">Apache Kafka</text><text x="240" y="480" class="boxText">Topic des événements</text><text x="240" y="502" class="small">clé = symbole</text>
+  <rect x="475" y="410" width="300" height="115" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/><text x="625" y="445" class="boxTitle">Spark Structured Streaming</text><text x="625" y="474" class="boxText">Lit Kafka en continu</text><text x="625" y="498" class="small">Fenêtres 1 min + watermark</text>
+  <rect x="475" y="600" width="300" height="125" rx="14" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/><text x="625" y="640" class="boxTitle">OHLCV / Candlesticks</text><text x="625" y="669" class="boxText">Open · High · Low · Close</text><text x="625" y="694" class="small">Volume, par symbole et minute</text>
+  <rect x="125" y="600" width="230" height="125" rx="14" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/><text x="240" y="646" class="boxTitle">PostgreSQL</text><text x="240" y="675" class="boxText">candles_streaming</text><text x="240" y="699" class="small">écriture idempotente</text>
+  <rect x="285" y="790" width="310" height="105" rx="14" fill="#fef3c7" stroke="#d97706" stroke-width="2"/><text x="440" y="833" class="boxTitle">Grafana</text><text x="440" y="861" class="boxText">Candlesticks AAPL · MSFT · NVDA</text>
+  <path d="M900 240 L900 370 L240 370 L240 410" class="line"/><path d="M355 467 L475 467" class="line"/><path d="M625 525 L625 600" class="line"/><path d="M475 662 L355 662" class="line"/><path d="M240 725 L240 760 L440 760 L440 790" class="line"/>
+  <text x="415" y="445" class="label">flux de trades</text><text x="694" y="572" class="label">agrégation</text>
+
+  <!-- lakehouse -->
+  <rect x="1010" y="410" width="260" height="115" rx="14" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/><text x="1140" y="452" class="boxTitle">MinIO Bronze</text><text x="1140" y="480" class="boxText">Données brutes Parquet</text><text x="1140" y="502" class="small">partitionnées, immuables</text>
+  <rect x="1405" y="410" width="260" height="115" rx="14" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/><text x="1535" y="452" class="boxTitle">Spark Batch</text><text x="1535" y="480" class="boxText">Nettoyage et contrôle qualité</text><text x="1535" y="502" class="small">doublons, prix/volume</text>
+  <rect x="1010" y="600" width="260" height="125" rx="14" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/><text x="1140" y="632" class="boxTitle">Iceberg Gold</text><text x="1140" y="661" class="boxText">Daily Return · Volatilité · VWAP</text><text x="1140" y="686" class="small">MA20 · MA50 · corrélations</text><text x="1140" y="708" class="small">Spark SQL</text>
+  <rect x="1405" y="600" width="260" height="125" rx="14" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/><text x="1535" y="640" class="boxTitle">Iceberg Silver</text><text x="1535" y="669" class="boxText">Trades propres + OHLCV</text><text x="1535" y="694" class="small">catalogue JDBC, fichiers MinIO</text>
+  <rect x="1100" y="790" width="270" height="105" rx="14" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/><text x="1235" y="830" class="boxTitle">PostgreSQL</text><text x="1235" y="858" class="boxText">Gold servi + alertes + historique</text>
+  <rect x="1480" y="790" width="200" height="105" rx="14" fill="#fef3c7" stroke="#d97706" stroke-width="2"/><text x="1580" y="833" class="boxTitle">Streamlit</text><text x="1580" y="861" class="boxText">Tableau analytique</text>
+  <path d="M900 240 L900 370 L1140 370 L1140 410" class="line"/><path d="M1270 467 L1405 467" class="line"/><path d="M1535 525 L1535 600" class="line"/><path d="M1405 662 L1270 662" class="line"/><path d="M1140 725 L1140 760 L1235 760 L1235 790" class="line"/><path d="M1370 842 L1480 842" class="line"/>
+  <text x="1335" y="445" class="label">lecture Bronze</text><text x="1604" y="572" class="label">métriques</text>
+
+  <!-- orchestration -->
+  <rect x="230" y="990" width="1340" height="75" rx="16" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="900" y="1021" class="boxTitle">Dagster — orchestration et traçabilité</text><text x="900" y="1048" class="boxText">Planifie Bronze → Silver → Gold ; évalue les alertes toutes les 5 minutes ; relance après échec</text>
+  <path d="M900 990 L900 940 L625 940 L625 725" class="dash"/><path d="M900 990 L900 940 L1535 940 L1535 725" class="dash"/><path d="M900 990 L900 940 L1235 940 L1235 895" class="dash"/>
+
+  <!-- alerts callout -->
+  <rect x="50" y="1085" width="1700" height="30" rx="10" fill="#fff1f2"/><text x="900" y="1107" class="small">Alertes : Gold → Dagster (toutes les 5 min) → PostgreSQL → Streamlit. Aucun traitement réservé à AAPL : chaque symbole est évalué indépendamment.</text>
+</svg>

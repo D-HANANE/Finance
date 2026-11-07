@@ -34,9 +34,16 @@ class Market:
         self.rng = random.Random(seed)
         self.prices = {symbol: 100.0 + 3 * i for i, symbol in enumerate(SYMBOLS)}
         self.sequence = 0
+        self.shock_sequence = 0
 
-    def shock(self, symbol="AAPL", factor=1.08):
+    def shock(self, symbol, factor=1.08):
         self.prices[symbol] *= factor
+
+    def shock_next(self, factor=1.08):
+        symbol = SYMBOLS[self.shock_sequence % len(SYMBOLS)]
+        self.shock_sequence += 1
+        self.shock(symbol, factor)
+        return symbol
 
     def next_trade(self):
         # Répartition uniforme : les 20 symboles passent dans chaque cycle.

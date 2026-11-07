@@ -27,7 +27,7 @@ styles['Heading2'].textColor=colors.black
 def footer(canvas,document):
     canvas.setFont('Helvetica',9)
     canvas.setFillColor(colors.HexColor('#555555'))
-    canvas.drawString(50,32,'Marché financier simulé | Projet académique | Octobre 2026')
+    canvas.drawString(50,32,'Marché financier simulé | Projet académique | Novembre 2026')
     canvas.drawRightString(A4[0]-50,32,str(document.page))
 
 

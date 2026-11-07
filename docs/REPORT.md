@@ -1,167 +1,123 @@
+> Rapport de la version 2. Pour la publication Gold dans PostgreSQL et les corrections multi-actions de la version 3, consulter docs/VALIDATION_MULTI_ACTIONS.md.
+
 # Plateforme de marché financier simulé
 
-## 1 Contexte et périmètre
+## 1. Objectif métier et périmètre
 
-Une salle de marché pédagogique suit vingt actions. Elle veut observer des échanges, comprendre les prix et repérer des mouvements inhabituels. Le projet construit une plateforme de données. Il ne cherche pas à prédire les cours ni à proposer des décisions d'investissement.
+Une équipe de suivi de marché souhaite observer les échanges de vingt actions, comprendre les tendances et repérer les variations importantes. La plateforme transforme des transactions individuelles en informations utilisables : chandeliers, moyennes mobiles, rendements, volatilité, VWAP, corrélations et alertes. Elle fournit un support à l'analyse, sans prétendre prédire les cours.
 
-Les symboles sont ceux d'entreprises réelles. Les prix, les quantités et les transactions sont entièrement simulés. Ce choix conserve le générateur fourni et répond à la demande de travail. Le sujet initial parle d'actions fictives. Cette adaptation est donc explicitée dans le dépôt et dans l'application.
+Deux besoins justifient deux chaînes indépendantes. Le suivi continu exige des bougies rapidement accessibles dans Grafana. L'analyse historique exige une archive durable, des transformations rejouables et des métriques cohérentes dans Streamlit. Les deux utilisent le même générateur, le même contrat et des dates UTC.
 
-La plateforme comprend un chemin continu et un chemin planifié. Le chemin continu transporte les échanges et calcule des chandeliers. Le chemin planifié construit les indicateurs analytiques et vérifie leur qualité. Les deux chemins partagent les mêmes définitions métier et le même fuseau UTC.
+Les symboles correspondent à des entreprises réelles, mais les prix et transactions sont simulés. La démonstration ne constitue pas une source de cotations réelles. Le générateur produit un choc contrôlé sur AAPL pour rendre observable un mouvement inhabituel.
 
-Les exigences obligatoires FIN-01 à FIN-08 constituent la priorité. Elles couvrent le débit, Kafka, Spark, Iceberg, Gold, les contrôles, Grafana et les alertes Streamlit. La latence de bout en bout et ClickHouse sont des options. Elles ne sont pas présentées comme réalisées.
-
-Le matériel cible dispose de seize gigaoctets de mémoire. Docker Desktop exécute des conteneurs Linux. Les images préparent leurs dépendances pendant la construction. Les volumes conservent les journaux, les tables et les checkpoints. Le démarrage doit rester possible avec deux commandes depuis le dossier du projet.
-
-Les auteurs doivent renseigner les membres du groupe dans le README. Aucun nom ni résultat de soutenance n'a été inventé.
+Cette version applique les précisions du 4 novembre 2026 : Gold calculé par Spark SQL et stocké dans Iceberg ; alertes exclusivement dans PostgreSQL ; aucun catalogue Hive. Les intervalles et seuils du cahier initial sont conservés. Les membres du groupe restent à renseigner dans le README.
 ---page---
-## 2 Examen initial et architecture
+## 2. Diagnostic et adaptation de l'existant
 
-Le dépôt initial contient un générateur Python, un producteur Kafka et un consommateur Bronze. Le stockage utilise une API S3 et conserve du JSONL et du Parquet. Le topic trades possède six partitions. Le symbole constitue la clé des messages. Ces éléments sont réutilisés.
+L'analyse a porté sur le cahier Word complet, les services Compose, le générateur, les archives MinIO, Spark, PostgreSQL, Grafana, Dagster et Streamlit. Le tableau détaillé se trouve dans docs/DIAGNOSTIC_V2.md. Les consignes explicites récentes prévalent sur le schéma générique et l'ancienne architecture.
 
-L'exemple Spark initial calcule des chandeliers mais ne déploie pas de catalogue ni de sorties persistantes. PostgreSQL, dbt, DuckDB, Soda, Dagster et les interfaces sont absents. Le test du choc utilise encore FIN01 alors que le générateur emploie AAPL. Le README ne correspond plus aux symboles du code. Ces écarts sont corrigés.
+Le dépôt comportait déjà un Producer, Kafka à six partitions, un consommateur Bronze avec manifestes, des calculs OHLCV, PostgreSQL et un tableau Grafana pour trois actions. Ces composants ont été conservés. L'ancienne analytique dbt/DuckDB et le précédent catalogue ne correspondaient plus à l'organisation demandée.
 
-Le chemin continu devient : générateur, Kafka, Spark, PostgreSQL et interfaces. En parallèle, le consommateur Bronze archive les mêmes messages. Spark lit directement Kafka et n'attend jamais la fin d'un lot Bronze.
+La chaîne continue devient Producer, Kafka, Spark Structured Streaming, PostgreSQL puis Grafana. Le consommateur Bronze conserve son chemin Producer, Kafka, MinIO. Un moteur Spark batch séparé lit ces archives et écrit Silver puis Gold dans Iceberg. Dagster évalue les métriques publiées et conserve les alertes dans PostgreSQL.
 
-Le chemin analytique devient : Iceberg Silver, export cohérent, DuckDB, modèles dbt, contrôles Soda et publication Gold. Dagster planifie ce chemin. Les services continus ne dépendent pas de ses horaires.
-
-Hive Metastore référence les tables Iceberg. PostgreSQL héberge une base distincte pour ses métadonnées. MinIO conserve les fichiers de données et de métadonnées Iceberg. Le rôle de chaque outil reste séparé et justifié.
-
-Le schéma Mermaid du README montre les deux chemins et les trois couches. Le dictionnaire documente le grain de chaque table. Le tableau de couverture relie chaque exigence au code et à sa vérification. Il distingue une fonctionnalité écrite d'un résultat effectivement exécuté.
+Les volumes existants, les fichiers bruts et les anciennes alertes sont préservés. Les nouveaux préfixes Iceberg et checkpoints sont versionnés pour éviter une réutilisation incompatible des journaux. Les documents de la première version sont archivés séparément. La migration est additive ; aucune remise à zéro des données n'est nécessaire.
 ---page---
-## 3 Génération et transport Kafka
+## 3. Producer et transport Kafka
 
-Le générateur parcourt les vingt symboles de façon cyclique. Chaque cycle garantit leur présence. Les prix suivent une petite marche aléatoire multiplicative. Une graine fixe stabilise les tirages. Chaque transaction reçoit un identifiant UUID distinct et une heure UTC avec microsecondes.
+Le contrat contient trade_id, symbol, price, quantity et event_time. Les anciens événements portant volume sont acceptés comme alias de quantity. Le prix utilise un décimal et l'horodatage est interprété en UTC. Le symbole doit appartenir aux vingt actifs connus, avec un prix et une quantité strictement positifs.
 
-Le champ quantity désigne le nombre d'actions échangées. Le champ volume est réservé aux agrégats de chandeliers. Les anciens messages utilisent volume pour une transaction ; les lecteurs gardent cet alias pour préserver la compatibilité avec les données déjà stockées.
+Le Producer existant est conservé. La clé Kafka est le symbole et le topic trades possède six partitions. Les confirmations de livraison permettent de mesurer le débit effectif. Une configuration de génération à 220 événements par seconde ne suffit pas à prouver que Kafka reçoit ce débit : un échantillonnage réel le vérifie.
 
-La cible est de 220 transactions par seconde au total. Elle laisse une marge par rapport au minimum de 200. L'horloge monotone pilote les envois. Les statistiques utilisent les callbacks de livraison Kafka. Un simple appel produce ne constitue pas une preuve de livraison.
+Le contrôle exécuté a reçu 5 513 événements en environ 25 secondes, soit 220,25 événements par seconde. Les vingt symboles et les six partitions étaient présents ; chaque clé correspondait au symbole du message. Cette mesure décrit le fonctionnement de la maquette au moment du contrôle.
 
-Le producteur active l'idempotence et demande tous les acquittements disponibles. Le symbole est la clé de partitionnement. À nombre de partitions constant, les événements d'une action arrivent dans une même partition. Kafka conserve cet ordre local. Le calcul OHLC utilise toutefois l'heure métier et un départage par identifiant.
-
-La configuration possède un seul broker. Le facteur de réplication vaut un. Elle répond à une maquette sur ordinateur personnel, sans tolérance à la perte du broker. Changer le nombre de partitions peut modifier le routage des clés. Cette opération exige donc une migration et ne doit pas être improvisée pendant la démonstration.
-
-Le choc contrôlé augmente AAPL de huit pour cent après six minutes. Sa détection est assurée ensuite par les données observées dans PostgreSQL, indépendamment du message de log du générateur.
+Kafka permet de découpler les consommateurs. Une interruption du streaming n'arrête pas l'archivage Bronze, et un traitement analytique lit MinIO sans consommer Kafka. La maquette utilise un seul broker : elle montre la séparation des traitements, mais ne constitue pas une infrastructure à haute disponibilité.
 ---page---
-## 4 Archivage Bronze et reprise
+## 4. Calcul des chandeliers en streaming
 
-Le consommateur Bronze utilise son propre groupe. Il accumule un lot limité par un nombre de messages ou une durée. Les limites évitent de garder indéfiniment les événements en mémoire. Un arrêt normal écrit également le dernier lot incomplet.
+Spark Structured Streaming consomme Kafka, vérifie le contrat et isole les événements invalides. La déduplication repose sur trade_id avec une watermark de deux minutes. Les données validées et les checkpoints sont conservés sur un volume distinct des fichiers analytiques.
 
-Le JSONL conserve les payloads bruts. Le Parquet ajoute les types et les coordonnées Kafka. Les colonnes de provenance comprennent le topic, la partition, l'offset, l'identifiant du lot et l'heure d'ingestion. Un message malformé conserve son brut et une erreur de décodage identifiable. Il ne doit pas bloquer tous les messages suivants.
+Les bougies ont un intervalle d'une minute. Open et Close correspondent respectivement au premier et au dernier événement selon le couple event_time et trade_id. High et Low sont les extrêmes du prix. Volume est la somme des quantités. Le notional représente la somme prix multiplié par quantité. Le départage par identifiant rend le résultat déterministe lorsque deux horodatages sont identiques.
 
-Le consommateur publie le manifeste après les deux objets de données. Le manifeste indique leurs clés, leur nombre de lignes et les prochains offsets par partition. Le vérificateur l'utilise pour sélectionner un lot complet. Son utilité justifie son maintien dans le projet.
+Deux sorties PostgreSQL servent des finalités différentes : une bougie provisoire se met à jour pendant la minute ; une bougie finalisée est publiée après progression de la watermark. La couche de service empêche une mise à jour provisoire de remplacer une ligne déjà finalisée.
 
-Les offsets Kafka sont validés de façon synchrone après la réussite de l'archivage. Un échec arrête le consommateur et Docker le relance. Les offsets non validés sont relus. Un crash après S3 mais avant Kafka peut donc rejouer les mêmes événements.
-
-L'identifiant de lot dépend des coordonnées Kafka. Un lot identique retrouve les mêmes clés d'objets. Si le découpage change après reprise, les objets peuvent contenir des doublons. La garantie est at-least-once. Elle ne devient pas exactly-once par la seule présence d'un manifeste.
-
-Le chemin batch_date reprend le plus ancien événement du lot. Il n'est pas une partition stricte de chaque ligne par date. Un lot peut traverser minuit. Les messages sans heure décodable sont classés sous invalid. La couche Silver déduplique les identifiants métier dans la borne temporelle définie.
+Un test Spark réel a vérifié une bougie de référence : Open 100, High 103, Low 98, Close 103, Volume 10 et notional 1007. Il a aussi contrôlé les doublons, les événements tardifs admis, les événements trop tardifs et la reprise depuis les checkpoints. Le streaming ne dépend plus d'Iceberg.
 ---page---
-## 5 Spark et temps d'événement
+## 5. PostgreSQL et Grafana
 
-Spark Structured Streaming lit directement le topic trades. Le JSON est décodé avec un schéma explicite. Le prix est décimal, la quantité entière et l'heure typée. Les contrôles vérifient les champs essentiels, le symbole, la clé Kafka, la positivité et la présence d'un fuseau. Un événement trop loin dans le futur est refusé pour éviter d'avancer artificiellement le watermark.
+La table candles possède une clé unique par symbole et début de minute. Les écritures remplacent les agrégats absolus au lieu d'ajouter une seconde fois les volumes. Le rejeu d'un micro-lot ne double donc pas les résultats. Des contraintes vérifient la cohérence OHLC et la positivité des volumes.
 
-Les rejets de contrat sont écrits dans une sortie Parquet séparée. Ils conservent le brut et les coordonnées Kafka. Les événements trop anciens abandonnés par les opérateurs temporels sont suivis par leurs métriques. Leurs messages restent auditables en Bronze.
+La table latest_prices conserve le dernier événement connu. Les opérations de service utilisent une transaction et un verrou PostgreSQL pour éviter les courses entre les sorties provisoires et finalisées. Le test PostgreSQL isolé vérifie le rejeu ainsi que la protection d'une bougie finale.
 
-La première requête valide et déduplique les trade_id avec un watermark de deux minutes. Elle écrit dans un Parquet intermédiaire persistant. Deux autres requêtes lisent cette zone : l'une publie les fenêtres provisoires, l'autre les fenêtres finalisées. Chaque requête possède son checkpoint. Cette séparation évite de chaîner deux opérations avec état dans une requête en mode update.
+Grafana conserve le dashboard existant : trois panneaux candlestick pour AAPL, MSFT et NVDA, chacun alimenté par PostgreSQL. Le rafraîchissement de cinq secondes est une fréquence de consultation ; les bougies restent d'une minute. Il ne faut pas confondre ces deux intervalles.
 
-Les fenêtres durent une minute : leur début est inclus et leur fin exclue. Open et Close suivent le minimum et le maximum du couple heure et trade_id. High et Low sont les extrêmes des prix. Volume additionne les quantités. Notional additionne les produits prix et quantité.
-
-Le watermark de deux minutes accepte des retards courts tout en bornant l'état. Il dépend des événements reçus. Il n'avance pas lorsque le flux s'arrête. Les deux étapes peuvent ajouter un délai. Une donnée admise corrige une fenêtre provisoire ; une donnée hors borne ne déclenche pas de correction historique automatique.
+Le test navigateur a réellement ouvert le tableau, vérifié les trois panneaux et l'absence de message No data ou Query error. Les captures de la version actuelle sont dans artifacts/ui. Les accès locaux et les variables de connexion sont documentés dans le README. PostgreSQL héberge aussi le catalogue JDBC et les alertes, dans des structures séparées de la même base.
 ---page---
-## 6 Silver Iceberg et catalogue Hive
+## 6. Bronze MinIO préservé
 
-La table lake.finance.candles contient une ligne par action et par minute. Elle conserve OHLC, volume, notional, nombre d'échanges et dernier événement. Le partitionnement Iceberg utilise le jour de minute_start. Les prix restent en décimal pour éviter une perte inutile lors des sommes pondérées.
+Le consommateur Bronze existant archive les messages Kafka sous forme JSONL et Parquet. Les coordonnées de provenance comprennent le topic, la partition et l'offset. Les messages malformés restent archivés avec une indication d'erreur, ce qui conserve la preuve brute et évite qu'un message inutilisable bloque la consommation.
 
-Les chandeliers provisoires sont utiles à l'affichage. Ils sont publiés dans PostgreSQL. Silver reçoit uniquement les fenêtres finalisées après passage du watermark. La table ne reçoit donc pas chaque version provisoire en append.
+L'organisation des préfixes json/trades, parquet/trades et manifests/trades est conservée. Un manifeste identifie les objets complets, leur nombre de lignes et les offsets à reprendre. Le consommateur confirme les offsets après la réussite des écritures. Un objet Parquet non accompagné d'un manifeste complet n'entre pas dans le traitement Silver.
 
-Le callback final utilise un MERGE sur le symbole et la minute. Rejouer le même micro-lot remplace la même ligne au lieu d'en ajouter une autre. Cette stratégie facilite les reprises après incident et permet de comparer une clé avant et après redémarrage.
+Spark batch dresse l'inventaire des manifestes et le compare au registre PostgreSQL lakehouse_files. La clé et l'ETag permettent de sélectionner les fichiers nouveaux ou modifiés. BRONZE_FILES_PER_RUN limite la taille du lot à 200 fichiers par défaut, afin de reprendre progressivement un historique important.
 
-Hive Metastore conserve les définitions et pointeurs des tables. Sa base PostgreSQL est distincte de la base de service. Les fichiers Iceberg restent dans MinIO. Spark utilise S3FileIO et le bundle AWS correspondant à Iceberg. Hive active séparément son Hadoop S3A déjà inclus, car il vérifie les chemins externes. Les deux piles Java restent dans des conteneurs distincts.
-
-Le catalogue est initialisé avant Spark. Le schéma Hive n'est créé que s'il est absent. Le pilote JDBC PostgreSQL est inclus dans l'image. Les droits sur les volumes sont préparés à la construction.
-
-La publication entre Iceberg, PostgreSQL et l'export n'est pas une transaction distribuée. Un échec provoque le rejeu du micro-lot. Les clés et les écritures absolues rendent ce rejeu idempotent. Les destinations peuvent cependant être temporairement décalées. La documentation ne promet pas une atomicité globale qui n'a pas été démontrée.
+Le test réel a relu un Parquet de 6 660 lignes et confirmé le nombre indiqué dans son manifeste. Les anciens objets et les nouvelles archives sont conservés. Le moteur analytique utilise exclusivement ces fichiers comme source ; il ne dépend ni des tables de streaming PostgreSQL ni d'un export de ce streaming.
 ---page---
-## 7 Base de service et alertes
+## 7. Catalogue Iceberg sans Hive
 
-PostgreSQL contient les chandeliers courants, les derniers prix et les alertes. La clé des chandeliers est le symbole et le début de minute. Les contraintes imposent les bornes OHLC et un volume non négatif. Les index servent les recherches temporelles et le choix de référence.
+Les données Silver et Gold ainsi que leurs fichiers de métadonnées sont stockés dans MinIO. Le catalogue Iceberg JDBC conserve les pointeurs transactionnels dans le schéma iceberg_catalog de la base PostgreSQL finance existante. Aucun nouveau service de base de données n'est ajouté.
 
-Les upserts écrivent des agrégats absolus. Ils n'ajoutent pas le volume d'un lot à une valeur déjà comptée. Une ligne finale ne peut pas être écrasée par une mise à jour provisoire. Un verrou transactionnel sérialise les deux publishers.
+Ce choix évite de fonder les commits d'un catalogue Hadoop sur des renommages d'objets S3 et fournit un mécanisme de commit transactionnel adapté au stockage MinIO. La configuration utilise explicitement JdbcCatalog et S3FileIO. Les lectures des Parquet Bronze utilisent S3A. Aucun HiveCatalog ni service Hive n'est présent dans l'architecture active.
 
-Le dernier prix avance selon le couple heure d'événement et identifiant. Une donnée tardive ne le fait pas reculer. À chaque publication live, ce prix est comparé à une observation de cinq minutes auparavant.
+Les versions vérifiées sont Spark 3.5.5, Scala 2.12, Iceberg 1.7.2, Java 11 et Hadoop 3.3.4. Le connecteur Hadoop AWS est aligné sur Hadoop 3.3.4. Les dépendances sont résolues pendant la construction de l'image pour rendre les démarrages reproductibles.
 
-La référence est le dernier close dont l'heure du dernier événement est antérieure ou égale à T moins cinq minutes. Elle ne doit pas avoir plus de six minutes. Sans cette référence, aucune alerte n'est créée. Le seuil utilise la valeur absolue de prix divisé par référence moins un. Il doit être strictement supérieur à cinq pour cent.
-
-Le journal conserve le prix, la référence, leurs heures, la variation et l'heure de détection. Une clé par symbole et créneau de cinq minutes empêche les doublons. Un délai minimal de cinq minutes évite les alertes répétitives sur un même mouvement durable.
-
-L'évaluation observe les derniers prix à chaque micro-lot. Un pic bref revenu avant la publication peut être manqué. Une correction tardive peut changer une référence future, mais ne réécrit pas une alerte déjà émise. Ces limites donnent un sens précis au résultat présenté en soutenance.
+Les tables sont placées sous des préfixes lakehouse-v2, sans supprimer l'ancien stockage. Un nouveau processus Spark a pu les retrouver après arrêt du moteur analytique et relire leurs snapshots. Référence technique : https://iceberg.apache.org/docs/1.7.2/jdbc/ ; les détails de configuration figurent dans spark/catalog.py.
 ---page---
-## 8 Gold et définitions analytiques
+## 8. Silver : transactions canoniques et bougies
 
-Le raccordement Silver vers Gold utilise une extraction automatisée. Spark lit un snapshot de la table Iceberg par le catalogue. Il écrit un fichier Parquet complet puis remplace atomiquement un pointeur. Dagster capture ce pointeur une fois pour tout le build. Un glob des fichiers data Iceberg serait incorrect, car il pourrait inclure des versions anciennes.
+La table silver.trades contient les transactions valides et leurs coordonnées Kafka. Le batch normalise les types et accepte l'alias historique volume. Les événements incomplets, les symboles inconnus et les valeurs invalides sont dirigés vers silver.rejected. L'identifiant de transaction constitue la clé de déduplication.
 
-Le modèle gold_minute a le grain action et minute finalisée. Il calcule les moyennes arithmétiques des vingt et cinquante derniers closes minute observés. Sans assez d'observations, le résultat reste NULL. Un trou allonge la durée réelle couverte ; il n'est pas rempli artificiellement.
+Le contrat considère trade_id comme immuable. Lorsqu'un identifiant existe déjà, sa première version canonique est conservée. Une modification du contenu sous le même identifiant n'est donc pas interprétée comme une correction métier. Cette limite est explicitée dans la documentation.
 
-Le modèle gold_daily a le grain action et jour UTC. Le rendement est la clôture du jour divisée par celle du jour UTC immédiatement précédent, moins un. Sans clôture de la veille, il reste NULL. Le jour courant est marqué partiel.
+Le batch identifie les minutes touchées et relit leurs transactions canoniques afin de recalculer entièrement chaque bougie concernée. Les règles Open, High, Low, Close et Volume sont identiques à celles du streaming. Les écritures MERGE remplacent les bougies, sans addition susceptible de doubler les volumes après reprise.
 
-Le VWAP journalier est la somme des notionals divisée par la somme des volumes. Le calcul conserve donc le poids exact des quantités. Il ne fait pas la moyenne de VWAP minute sans pondération.
-
-La volatilité quotidienne est l'écart type échantillonnal des log-rendements minute consécutifs observés dans le jour. Au moins deux rendements sont nécessaires. Elle reste en unité de rendement par minute et n'est pas annualisée. La méthode est explicite pour éviter de confondre fréquence des observations et grain du résultat.
-
-Les corrélations utilisent Pearson sur les minutes communes des actions, avec au moins trois observations. Le journal Gold des alertes reprend les détections de la base de service. Les modèles sont reconstruits intégralement, choix simple et correct pour ce petit grain et les journées encore modifiées.
+Des contrôles vérifient les valeurs OHLC et l'unicité des clés avant écriture. Les fichiers ne sont marqués comme traités qu'après réussite de Silver. Les minutes modifiées sont inscrites dans lakehouse_dirty afin de déclencher Gold. Le contrôle indépendant a compté 3 576 648 transactions et 5 860 bougies, puis recalculé une bougie depuis les transactions pour comparer tous ses agrégats.
 ---page---
-## 9 Qualité et vérifications
+## 9. Gold et métriques Spark SQL
 
-La qualité intervient à plusieurs niveaux. Le contrat d'entrée protège Spark contre les événements inutilisables. Les contraintes PostgreSQL empêchent des chandeliers incohérents d'entrer dans la base de service. Les tests dbt vérifient les modèles analytiques. Soda apporte des contrôles opérationnels sur la présence et la fraîcheur.
+Gold conserve trois familles de résultats : les métriques minute, les statistiques quotidiennes et les corrélations. Le calcul utilise Spark SQL sur Silver. Les tables sont Iceberg et restent dans MinIO. Les alertes ne sont jamais matérialisées dans une table Iceberg.
 
-Les règles imposent low inférieur ou égal à open et close, eux-mêmes inférieurs ou égaux à high. Aucun volume négatif n'est admis. Les champs indispensables ne doivent pas être nuls. La clé symbole et minute doit être unique. La table doit contenir des données et son dernier chandelier doit dater de moins de dix minutes.
+Les métriques minute comprennent la clôture, MA20, MA50, le log-rendement, le VWAP cumulé depuis minuit UTC et la variation sur cinq minutes. Les moyennes mobiles utilisent vingt ou cinquante clôtures minute observées. Sans historique suffisant, la valeur reste NULL. La référence de variation doit correspondre à la minute exactement cinq minutes auparavant.
 
-Le seuil de fraîcheur tient compte de la finalisation et de la planification Gold. Il n'affirme pas une latence graphique de dix minutes. La mesure transaction vers rendu client serait une autre exigence, classée optionnelle.
+Le VWAP est la somme des notionals divisée par la somme des quantités ; ce n'est pas une moyenne simple des prix. Gold quotidien calcule le rendement entre jours consécutifs, la volatilité des log-rendements minute, le VWAP et la couverture. Les corrélations Pearson utilisent les rendements des actifs sur les minutes communes et des statistiques intermédiaires par jour.
 
-Le test métier indépendant fournit un exemple connu : Open 100, High 103, Low 98, Close 103, Volume 10 et Notional 1007. Il inclut un départage d'heure identique et un doublon. Le test Spark reproduit cet exemple dans de vraies requêtes avec état, ajoute des retards puis redémarre les checkpoints.
-
-Le test Gold utilise une base temporaire et soixante minutes simulées. Les valeurs attendues de MA20, MA50 et VWAP sont calculées séparément. L'absence de clôture de la veille ne doit pas produire un rendement inventé. Un jeu incohérent doit faire échouer les contrôles.
-
-Seul le journal VALIDATION.md atteste les contrôles réellement exécutés. Un fichier de configuration, une compilation Python ou une réponse HTTP ne constitue pas une preuve suffisante de toute la chaîne fonctionnelle.
+Le traitement reprend les journées touchées et le contexte nécessaire aux fenêtres. Il ne reconstruit pas systématiquement tout l'historique brut. Une publication PostgreSQL expose un ensemble cohérent d'identifiants de snapshots après réussite. Streamlit lit ces snapshots validés. Un test Spark sur des valeurs connues a confirmé MA20 149,5, MA50 134,5 et VWAP 129,5.
 ---page---
-## 10 Planification et présentation
+## 10. Alertes relationnelles et historique
 
-Dagster pilote le chemin planifié. Une planification s'exécute toutes les cinq minutes. Une autre s'exécute à 00:05 UTC pour les traitements de fin de journée. Elles réutilisent la même fonction, avec un verrou exclusif sur DuckDB. Deux exécutions ne peuvent donc pas écrire simultanément dans le fichier analytique.
+L'architecture des alertes est Gold, Dagster, PostgreSQL puis Streamlit. La règle du cahier est conservée : variation absolue strictement supérieure à cinq pour cent sur cinq minutes. Une variation exactement égale à cinq pour cent ne déclenche pas d'alerte. Aucun seuil financier supplémentaire n'est inventé.
 
-Le traitement copie le journal des alertes, construit les modèles dbt et lance Soda. Une publication Gold ne commence que si ces contrôles réussissent. Les trois tables de service changent dans une seule transaction PostgreSQL. En cas d'échec, la dernière version validée reste visible. Dagster conserve l'erreur et effectue deux relances.
+Dagster évalue les observations Gold nouvelles ou corrigées, et non uniquement la dernière bougie. Le curseur porte sur la date de modification des métriques pour prendre en compte une correction ancienne. Le traitement ne recalcule pas les métriques financières déjà présentes dans Gold.
 
-Un rapport CSV accompagne les traitements. Le fichier représente les résultats calculés, avec leur grain et leur jour. Il ne contient ni capture fabriquée ni mesure extrapolée.
+Une séquence continue au-dessus du seuil forme un épisode, identifié par un UUID déterministe. Une nouvelle observation dans cet épisode actualise la même alerte. Le retour d'une observation valide dans le seuil la résout. Une référence manquante ne clôture pas artificiellement l'épisode. La clôture est manuelle après résolution, car le cahier ne précise pas cette règle de cycle de vie.
 
-Grafana est provisionné au démarrage. Sa source PostgreSQL et son tableau de bord ne demandent pas une configuration manuelle. Trois panneaux montrent AAPL, MSFT et NVDA. Le rafraîchissement est de cinq secondes. Les panneaux utilisent les champs Open, High, Low, Close et Volume.
-
-Streamlit propose le choix d'une action, les chandeliers, les indicateurs, le journal des alertes et les corrélations. Les données provisoires sont identifiées. Gold représente les seules fenêtres finalisées, même si la journée courante peut encore être partielle. Les résultats absents ne sont pas remplacés par des chiffres plausibles.
-
-GitHub Actions exécute les tests réalisables sans infrastructure externe. Le workflow versionné ne constitue pas la preuve d'un run distant tant que le dépôt n'est pas poussé. Aucun accès à un compte GitHub ni aucune publication externe n'est supposé.
+PostgreSQL conserve alerts, alert_observations, alert_history et alert_state. Les contraintes, empreintes et transactions évitent les doublons et conservent les changements de statut. Les 35 anciennes détections sont préservées et identifiées comme historiques. Les tests PostgreSQL couvrent les rejeux, les corrections, la résolution et la clôture idempotente.
 ---page---
-## 11 Résultats observés et preuves
+## 11. Dagster, reprise et consultation
 
-Le démarrage complet par Docker Compose réussit sur la machine Windows. Les cinq tests unitaires passent dans l'image Python. Le test Spark réel confirme OHLCV égal à 100, 103, 98 et 103, un volume de 10 et un notional de 1007. Il couvre également les doublons, les retards et la reprise avec checkpoints.
+Les services continus sont lancés par Docker Compose. Dagster les supervise au moyen d'assets bornés qui vérifient Kafka, la disponibilité des requêtes Spark et les données PostgreSQL. Le job streaming_supervision se termine normalement ; aucune boucle infinie ne monopolise un run.
 
-Le contrôle Kafka observe vingt symboles, six partitions et des clés correctes. Il reçoit 5 503 événements en environ vingt-cinq secondes, soit 220,04 par seconde. Les confirmations du producteur restent proches de 220 par seconde, sans erreur. Un lot Bronze complet de 6 681 lignes est relu avec son manifeste.
+Le job lakehouse_refresh enchaîne Bronze, Silver, Gold puis alertes. Son schedule actif utilise le cron */5 * * * * en UTC. Un job alerts_refresh permet de réévaluer Gold sans recalcul analytique. Un schedule de fin de journée à 00:07 UTC réutilise le même traitement. La fréquence d'évaluation des alertes ne change pas le grain minute des données.
 
-Une comparaison de 380 lignes finalisées montre des valeurs identiques entre Iceberg et PostgreSQL. La lecture par identifiant de snapshot réussit. Après redémarrage réel de Spark et Bronze, vingt chandeliers finalisés restent inchangés et aucune clé dupliquée n'apparaît.
+La file Dagster limite la concurrence. Les writers disposent aussi de verrous PostgreSQL et d'un registre des demandes exécutées. Deux nouvelles tentatives du même identifiant réutilisent le résultat validé. Les étapes possèdent une politique de retry et les runs interrompus restent traçables. Les volumes conservent l'historique d'orchestration et les checkpoints.
 
-Le run Dagster du 26 octobre à 15:34 UTC réussit. Il construit six modèles, exécute quinze tests dbt, génère la documentation, passe quatorze contrôles Soda et publie Gold. Un chandelier incohérent injecté dans une base temporaire fait échouer les contrôles comme attendu. Le contrôle de fraîcheur a aussi bloqué un snapshot ancien pendant le rattrapage.
-
-À 15:39 UTC, PostgreSQL contient 2 400 chandeliers, dont 2 340 finalisés, et quinze alertes. Une alerte AAPL à 15:33 UTC mesure une variation de plus de huit pour cent. Grafana affiche trois panneaux de chandeliers. Streamlit affiche le journal, Gold et les corrélations. Les captures proviennent du navigateur réel.
-
-VALIDATION.md conserve les résultats détaillés et leurs limites. Les compteurs évoluent pendant le flux. Aucun run GitHub distant ni déclenchement de fin de journée à 00:05 n'est revendiqué. La consommation ponctuelle observée est d'environ quatre gibioctets pour les services.
+Streamlit lit les métriques via le service Spark interne, puis les alertes directement dans PostgreSQL. Les lecteurs utilisent des snapshots Gold publiés et peuvent consulter les résultats pendant un nouveau batch. Les tables actives, l'historique et les changements d'état sont visibles. Le lecteur n'a pas besoin d'une socket Docker ni d'un accès au catalogue Hive.
 ---page---
-## 12 Limites et soutenance
+## 12. Validation, limites et démonstration
 
-La plateforme est une maquette locale. Kafka possède un seul broker. PostgreSQL et MinIO utilisent des volumes locaux. La rétention Kafka est limitée. Une panne longue peut dépasser les offsets disponibles. Le code échoue explicitement au lieu d'ignorer cette perte. Une reconstruction historique depuis Bronze nécessite un traitement dédié.
+Les validations de cette version ont été exécutées le 4 novembre 2026. Les neuf tests unitaires passent dans le conteneur. Les tests Spark réels couvrent OHLCV, retards, doublons, checkpoints et indicateurs sur des données connues. Les tests PostgreSQL isolés vérifient les upserts et les épisodes d'alerte.
 
-Les checkpoints Spark, la zone Parquet intermédiaire et les tables doivent rester cohérents. Supprimer un seul volume peut invalider les hypothèses de reprise. L'espace disque grandit avec le flux, les fichiers intermédiaires et les snapshots. Une politique de maintenance serait nécessaire pour une exploitation durable.
+Le run Dagster d5a12d14-9789-4b01-be0d-fcab377bc733 a terminé Bronze, Silver, Gold et alertes. Le run b1eff61b-c4b9-4a55-8889-b27b4f8f0e2a a ensuite réussi avec le service streaming volontairement arrêté. Le cas inverse a également été observé : le streaming a continué pendant l'arrêt du moteur analytique et la relecture indépendante d'Iceberg.
 
-Le déploiement cible seize gigaoctets physiques. Spark s'exécute localement avec deux threads et une mémoire limitée. Les limites réelles dépendent aussi de la mémoire attribuée à Docker. Le nombre de conteneurs ne suffit pas à évaluer la consommation ; les mesures Docker doivent accompagner une répétition.
+Le navigateur de test a ouvert Streamlit et Grafana, affiché les métriques et alertes et vérifié les trois panneaux candlestick. Un premier délai de chargement Grafana a été dépassé ; le contrôle a réussi avec un délai adapté. L'incompatibilité initiale de MERGE Spark a été corrigée puis validée par les exécutions suivantes. Les erreurs restent dans l'historique.
 
-L'alerte utilise une observation proche de cinq minutes et une fréquence de micro-lot. Elle ne traite pas tous les ticks intermédiaires. La volatilité décrit les log-rendements minute disponibles. Les moyennes mobiles demandent un historique suffisant. Les champs NULL sont une information correcte, pas un défaut à masquer.
-
-La démonstration dure sept minutes. Elle montre l'ingestion, Bronze, le grain Silver, les chandeliers Grafana, une alerte Streamlit et un run qualité. La préparation doit avoir commencé au moins dix minutes avant ; cinquante minutes sont nécessaires pour observer MA50 sans données historiques ajoutées.
-
-Les bonus de latence complète et de comparaison ClickHouse ne sont pas revendiqués. Le travail privilégie les obligations, la traçabilité et la possibilité de reprendre un traitement sans annoncer des garanties non démontrées.
+Les résultats détaillés et les commandes sont dans VALIDATION.md. La maquette n'offre pas de haute disponibilité ni de transaction distribuée entre PostgreSQL et Iceberg. La publication par snapshots et les écritures idempotentes encadrent cette limite. La CI est configurée mais aucune exécution GitHub distante n'est revendiquée. Le guide docs/DEMO.md propose une présentation de sept minutes.

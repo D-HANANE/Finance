@@ -24,9 +24,12 @@ class MarketTests(unittest.TestCase):
 
     def test_controlled_shock(self):
         market = Market()
-        old = market.prices["AAPL"]
-        market.shock()
-        self.assertAlmostEqual(market.prices["AAPL"] / old, 1.08)
+        old = dict(market.prices)
+        observed = [market.shock_next() for _ in range(2*len(SYMBOLS))]
+        self.assertEqual(observed, list(SYMBOLS)*2)
+        for symbol in SYMBOLS:
+            self.assertAlmostEqual(market.prices[symbol] / old[symbol], 1.08**2)
+
 
 
 class StorageTests(unittest.TestCase):

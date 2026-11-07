@@ -19,7 +19,7 @@ subprocess.run(['docker','compose','restart','consumer-bronze','spark'],check=Tr
 deadline=time.monotonic()+180
 while time.monotonic()<deadline:
     status = subprocess.run(['docker','compose','exec','-T','spark','python3','-c',
-        "import pathlib,time; p=pathlib.Path('/state/heartbeat'); assert time.time()-p.stat().st_mtime<15"],capture_output=True)
+        "import pathlib,time,json,urllib.request; d=json.load(urllib.request.urlopen('http://localhost:8091/health',timeout=5)); assert d['active'] and len(d['queries'])==4; p=pathlib.Path('/state/v2/heartbeat'); assert time.time()-p.stat().st_mtime<15"],capture_output=True)
     if status.returncode==0:
         break
     time.sleep(3)

@@ -3,12 +3,12 @@
 | Outil | Licence | Problème résolu |
 |---|---|---|
 | Python | PSF | Simulation et scripts |
-| Kafka, Spark, Hive, Iceberg | Apache-2.0 | Transport, calcul, catalogue, transactions de table |
+| Kafka, Spark, Iceberg | Apache-2.0 | Transport, calcul, catalogue, transactions de table |
 | MinIO | AGPL-3.0 | Stockage objet S3 local |
-| PostgreSQL | PostgreSQL License | Service transactionnel et backend HMS |
-| dbt Core, dbt-duckdb | Apache-2.0 | Modèles SQL, tests et lineage |
-| DuckDB | MIT | Analytique embarquée |
-| Soda Core 3.5.6 | Apache-2.0 | Contrôles opérationnels |
+| PostgreSQL | PostgreSQL License | Chandeliers, alertes et catalogue Iceberg JDBC |
+| dbt Core, dbt-duckdb (archives v1) | Apache-2.0 | Ancien traitement conservé, inactif |
+| DuckDB (archives v1) | MIT | Ancienne analytique, inactive |
+| Soda Core 3.5.6 (archives v1) | Apache-2.0 | Anciens contrôles, inactifs |
 | Dagster | Apache-2.0 | Plans, relances, historique |
 | Grafana OSS | AGPL-3.0 | Chandeliers en continu |
 | Streamlit | Apache-2.0 | Application analytique |
@@ -27,6 +27,6 @@ Références techniques :
 - https://spark.apache.org/docs/3.5.5/structured-streaming-programming-guide.html
 - https://spark.apache.org/docs/3.5.5/structured-streaming-kafka-integration.html
 - https://iceberg.apache.org/docs/1.7.2/aws/
-- https://hive.apache.org/docs/latest/admin/setting-up-hive-with-docker/
+- https://iceberg.apache.org/docs/1.7.2/jdbc/
 - https://grafana.com/docs/grafana/latest/visualizations/panels-visualizations/visualizations/candlestick/
 - https://github.com/sodadata/soda-core/tree/v3.5.6

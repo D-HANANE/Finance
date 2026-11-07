@@ -1,105 +1,96 @@
-# Architecture et décisions
+# Architecture active version 2
 
-## Autorité et existant
+Les précisions utilisateur remplacent les parties devenues incompatibles du cahier Word
+et du schéma générique : Spark SQL construit Gold Iceberg, et les alertes résident
+exclusivement dans PostgreSQL.
 
-Le dépôt initial contenait génération, Kafka et Bronze. L'exemple Spark n'était
-pas déployé. PostgreSQL, Iceberg, Hive, Gold et les interfaces étaient absents.
-Le test du choc et le README visaient encore FIN01. Les obligations viennent
-du sujet 4 ; les règles IOT présentes dans le document ne s'appliquent pas.
+## Deux chaînes
 
-## Livraison et ordre
+Le Producer et Kafka sont conservés. Le consommateur Bronze conserve son contrat
+JSONL/Parquet/manifeste et ses commits après archivage. Les deux lecteurs restent indépendants.
 
-Le producteur utilise `symbol` comme clé, avec six partitions fixes, idempotence
-et `acks=all`. Kafka ordonne dans une partition ; le mono-broker ne tolère pas
-sa perte. Changer le nombre de partitions changerait le routage des symboles.
-OHLC dépend de `(event_time,trade_id)`, indépendamment de l'arrivée.
-Un identifiant dupliqué doit représenter le même événement. En cas de contenu
-conflictuel, la première version observée gagne ; le conflit viole le contrat.
+Le service spark utilise les contrôles de contrat, la déduplication temporelle,
+les fenêtres d'une minute et le tri (event_time,trade_id) existants. Il publie
+uniquement les chandeliers courants/finalisés et les derniers prix dans PostgreSQL.
+Grafana conserve ses trois panneaux et son rafraîchissement cinq secondes.
+Un échec du worker lakehouse ne provoque pas l'arrêt de ces requêtes.
 
-Bronze écrit JSONL, Parquet et manifeste avant le commit synchrone des prochains
-offsets. Le manifeste sert au vérificateur et à l'audit. Même lot rejoué : mêmes
-clés ; découpage différent : doublons possibles. Garantie **at-least-once**.
-Aucune transaction distribuée S3/Kafka ni garantie exactly-once globale.
+Le service lakehouse possède une autre session Spark et n'a aucune source Kafka.
+Il lit les manifestes Bronze, puis les Parquet MinIO. Le registre lakehouse_files
+ne marque un fichier traité qu'après les écritures Silver. La table de transactions
+canoniques évite de compter deux fois les copies d'un trade_id réparties dans plusieurs lots.
+Les minutes concernées sont recalculées avec les transactions canoniques complètes,
+puis fusionnées par (symbol,minute_start). Les retards historiques ne sont pas supprimés.
 
-## Requêtes et watermark
+## Catalogue sans service supplémentaire
 
-Quatre requêtes persistantes tournent dans Spark local avec deux threads :
+JdbcCatalog utilise les transactions PostgreSQL existantes. Les métadonnées du
+catalogue sont dans iceberg_catalog. Les fichiers Iceberg sont dans les buckets
+silver et gold, sous lakehouse-v2. Le JDBC driver 42.7.5 est inclus dans l'image.
+Spark 3.5.5/Scala 2.12 utilise Iceberg 1.7.2, son AWS bundle v2 et S3FileIO.
+Bronze est lu avec S3A : hadoop-aws 3.3.4 et AWS SDK v1.12.262, compatibles avec le
+Hadoop 3.3.4 déjà fourni par Spark. Les espaces de packages SDK v1/v2 sont distincts.
+Les dépendances sont résolues lors de la construction, pas au démarrage.
 
-1. Rejets de contrat vers Parquet, checkpoint `rejected`.
-2. Validation puis `dropDuplicatesWithinWatermark(trade_id)`, watermark deux
-   minutes, sink Parquet natif, checkpoint `validated`.
-3. Lecture de ce Parquet, fenêtres minute avec watermark deux minutes,
-   sortie update vers PostgreSQL, checkpoint `live`.
-4. Même source et agrégation, sortie append de fenêtres finalisées,
-   MERGE Iceberg puis publication finale PostgreSQL, checkpoint `silver`.
+## Gold incrémental et visibilité
 
-Les checkpoints sont sous `/state/checkpoints`. Séparer déduplication et
-agrégation évite de chaîner deux opérateurs avec état en mode update. Le sink
-Parquet natif possède son journal de fichiers engagés, utilisé par la source.
-Le volume `/state` est indispensable. Cette zone locale n'est pas purgée
-automatiquement ; surveiller sa croissance. Les archives durables sont en S3.
+Les minutes sales sont consignées dans lakehouse_dirty après Silver. Gold
+recalcule les jours touchés, avec 49 observations avant et après pour les effets
+des moyennes mobiles. Le cumul VWAP exige de recalculer le jour complet concerné.
+Les calculs quotidiens incluent les jours voisins nécessaires au rendement.
+Les corrélations maintiennent les sommes et produits par paire et par jour,
+puis agrègent ces statistiques plutôt que tous les rendements minute.
 
-Deux minutes tolèrent les petits retards réseau. Le watermark dépend des heures
-reçues, pas de l'horloge murale. Sans nouvelles données, il n'avance pas. Les
-deux étapes peuvent ajouter du délai : aucune promesse d'une finalisation
-exactement deux minutes après l'horloge réelle. Les données tardives admises
-corrigent la fenêtre provisoire. Les abandons hors borne sont comptés dans
-`numRowsDroppedByWatermark`, conservés dans `/state/metrics`, et restent auditables
-en Bronze. Une fenêtre finale n'est pas corrigée automatiquement hors borne.
+Chaque métrique minute possède metric_updated_at. Un MERGE ne modifie cette date
+que si les valeurs financières changent. Ainsi, une correction ancienne est visible
+du traitement d'alertes sans imposer un rescan de tout Gold à chaque passage.
+Un curseur inclusif est rejouable grâce aux empreintes des observations.
 
-## Iceberg et service
+Les tables Iceberg ne peuvent pas être engagées ensemble dans une transaction
+PostgreSQL. Une publication conserve donc les identifiants de snapshots Gold après
+le succès de toutes les écritures et contrôles. L'API de lecture et l'évaluation
+d'alertes utilisent ces versions publiées, jamais un mélange de tables en cours.
 
-Hive conserve les pointeurs des tables dans la base PostgreSQL `metastore`.
-Hive 4.0.0 est retenu : 4.0.1 a supprimé l'appel Thrift get_table utilisé par
-le client de Spark 3.5. Le namespace administratif a un chemin local HMS ;
-la table Iceberg possède une localisation S3 explicite.
-Les chandeliers, manifests et metadata Iceberg sont dans `s3://silver/warehouse`.
-Spark utilise S3FileIO et l'AWS SDK v2 du bundle Iceberg. Le serveur Hive vérifie
-aussi les chemins externes : son Hadoop 3.3.6 et son SDK AWS v1.12.367, déjà inclus
-dans l'image, sont activés uniquement dans ce conteneur. Les deux piles Java ne
-sont pas mélangées dans le processus Spark. La table est partitionnée
-par jour ; sa clé logique est `(symbol,minute_start)`. Seules les fenêtres
-finalisées entrent dans Iceberg. Un MERGE rend chaque lot rejouable.
+## Alertes et cycle de vie
 
-PostgreSQL contient les valeurs absolues OHLCV et des clés primaires. Les upserts
-n'incrémentent jamais un compteur existant. Un writer provisoire ne remplace
-jamais une ligne finale. Un verrou transactionnel sérialise les publications.
-Les derniers prix avancent selon `(event_time,trade_id)` et ne régressent pas
-avec un événement tardif. La transaction calcule aussi les alertes.
+Gold stocke le changement sur cinq minutes, pas des alertes.
+La référence est le close de la minute exactement cinq minutes auparavant.
+Sans cette minute, change_5m est NULL. Dagster compare sa valeur absolue à 0.05.
+Le job parcourt toutes les observations nouvelles ou corrigées depuis le curseur.
 
-Le callback final exécute MERGE Iceberg, PostgreSQL puis export. Un échec empêche
-le commit du micro-lot Spark et provoque un rejeu. Les effets sont idempotents
-par clé ; il subsiste un intervalle de désynchronisation entre destinations.
-Les volumes Kafka/Spark/PostgreSQL/MinIO doivent être préservés ensemble.
+Les états sont active, resolved et closed. Le retour dans le seuil sur une
+observation valide résout l'épisode. Une référence absente laisse l'état inchangé.
+La clôture est une décision manuelle explicite, car le cahier ne définit pas
+de règle automatique de clôture. Aucun nouveau seuil n'a été ajouté.
 
-## Gold et orchestration
+Les observations et épisodes sont identifiés par clé métier et UUID déterministe.
+Une transaction PostgreSQL et un verrou couvrent l'évaluation, les upserts,
+l'historique et le curseur. Les épisodes des actifs concernés sont reconstruits
+à partir des observations conservées pour intégrer les corrections tardives.
+L'historique des changements n'est pas dupliqué lors d'un rejeu.
 
-Chaque micro-lot final non vide exporte une lecture de la table Iceberg via son
-catalogue vers un fichier Parquet complet. Un remplacement atomique publie le
-pointeur `/exchange/silver.json` seulement après la fin de l'écriture. Un glob
-sur les fichiers data Iceberg serait incorrect : anciennes versions et suppressions.
-Dagster capture une seule version du pointeur pour tout le build. Les anciennes
-générations restent au moins 24 h pour les lecteurs en cours.
+## Dagster et reprise
 
-Un verrou exclusif évite deux writers DuckDB. Les modèles sont reconstruits
-intégralement, choix adapté au faible grain minute et aux journées courantes
-encore modifiées. dbt puis Soda doivent réussir avant la publication atomique
-des tables Gold dans PostgreSQL. Les interfaces ne lisent pas le DuckDB ouvert
-en écriture. Dagster planifie toutes les cinq minutes et à 00:05 UTC, conserve
-l'historique et effectue deux relances. Un rapport CSV est produit au même run.
-DuckDB est fixé à 1.0.0 : Soda Core 3.5.6 impose une version inférieure à 1.1.
-Soda utilise un environnement Python distinct de dbt, avec la même version du
-moteur pour lire le même format de fichier.
+Les assets de streaming sont des observations finies des services continus.
+Compose gère leur cycle de vie. Les assets lakehouse sont bronze -> silver ->
+gold -> alerts, avec des tâches bornées dans un worker analytique distinct.
+Le schedule de cinq minutes applique les dépendances dans cet ordre.
+Le job alerts_refresh peut être lancé séparément sans recalculer les métriques.
 
-## Alertes
+Un seul run est lancé à la fois par la file Dagster. Les verrous PostgreSQL et
+la sérialisation du worker protègent également les appels manuels concurrents.
+Un request_id déjà réussi renvoie son résultat sans réexécution. Un échec conserve
+les fichiers et minutes à reprendre. Les anciens runs et données ne sont pas effacés.
 
-À chaque mise à jour live, le dernier prix T est comparé au dernier close dont
-`last_event_time <= T-5 minutes` et `>= T-6 minutes`. C'est une observation réelle,
-sans interpolation, proche des cinq minutes. Sans référence : aucune alerte.
-Le seuil est `abs(price/reference_price - 1) > 0.05`, en fraction.
+## Publication Gold PostgreSQL — version 3
 
-L'évaluation porte sur les derniers prix de chaque micro-lot ; un pic qui revient
-avant la publication peut être manqué. Cette limite est explicite. Les alertes
-ont une clé symbole/créneau de cinq minutes et un délai minimal de cinq minutes
-depuis la précédente. Le rejeu ne les duplique pas. Une correction tardive peut
-modifier une référence future ; les alertes déjà émises ne sont pas réécrites.
+Spark publie ses résultats Gold dans les tables existantes gold_minute, gold_daily et
+gold_correlations. Les valeurs sont copiées depuis les snapshots validés ; PostgreSQL
+ne recalcule pas les indicateurs. gold_serving_publication et lakehouse_publication
+changent dans la même transaction, après les upserts. Streamlit lit ces projections
+dans une transaction repeatable read. L’API Gold reste disponible pour les contrôles
+et pour les observations utilisées par le moteur d’alertes.
+
+La première publication de gold-v3-vwap-precision répare l’historique une seule fois ;
+les suivantes publient les métriques minute modifiées, avec un curseur inclusif et des upserts.
+Les agrégats quotidiens et corrélations sont de petites tables de synthèse.

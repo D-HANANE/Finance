@@ -67,6 +67,8 @@ services:
     <<: *app
     command: ["python", "init_services.py"]
     depends_on:
+      postgres:
+        condition: service_healthy
       kafka:
         condition: service_healthy
       minio:
@@ -110,7 +112,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_demo_change_me}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/001-init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+      - ./postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U finance -d finance"]
       interval: 5s
@@ -119,57 +121,54 @@ services:
     mem_limit: 512m
     restart: unless-stopped
 
-  metastore:
-    build:
-      context: .
-      dockerfile: hive/Dockerfile
-    environment:
-      AWS_ACCESS_KEY_ID: ${S3_ROOT_USER:?Configurer .env}
-      AWS_SECRET_ACCESS_KEY: ${S3_ROOT_PASSWORD:?Configurer .env}
-      SERVICE_OPTS: >-
-        -Xmx512m
-        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
-        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore
-        -Djavax.jdo.option.ConnectionUserName=finance
-        -Djavax.jdo.option.ConnectionPassword=${POSTGRES_PASSWORD:-local_demo_change_me}
-        -Dhive.metastore.warehouse.dir=file:///tmp/hive-warehouse
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9083'"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-    mem_limit: 1g
-    restart: on-failure
-
   spark:
     build:
       context: .
       dockerfile: spark/Dockerfile
+    image: finance-market-spark:local
     environment:
       <<: *app-env
       TZ: UTC
       SPARK_MAX_OFFSETS: ${SPARK_MAX_OFFSETS:-50000}
     volumes:
       - spark_state:/state
-      - exchange:/exchange
     depends_on:
       init:
         condition: service_completed_successfully
-      metastore:
-        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python3", "-c", "import pathlib,time; p=pathlib.Path('/state/heartbeat'); assert p.exists() and time.time()-p.stat().st_mtime<90"]
+      test: ["CMD","python3","-c","import urllib.request; urllib.request.urlopen('http://localhost:8091/health')"]
       interval: 30s
       timeout: 5s
       start_period: 120s
       retries: 3
-    mem_limit: 3g
+    mem_limit: 2560m
     restart: on-failure
-    stop_grace_period: 60s
+    stop_grace_period: 30s
+
+  lakehouse:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    image: finance-market-spark:local
+    entrypoint: ["/opt/spark/bin/spark-submit","--master","local[2]","--driver-memory","1280m","--conf","spark.sql.shuffle.partitions=4","--conf","spark.driver.extraJavaOptions=-Duser.timezone=UTC","/opt/finance/runner.py"]
+    environment:
+      <<: *app-env
+      TZ: UTC
+      BRONZE_FILES_PER_RUN: ${BRONZE_FILES_PER_RUN:-200}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD","python3","-c","import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 4
+    mem_limit: 2560m
+    restart: on-failure
+    stop_grace_period: 30s
 
   dagster:
     build:
@@ -177,9 +176,9 @@ services:
       dockerfile: analytics/Dockerfile
     environment:
       <<: *app-env
+      LAKEHOUSE_URL: http://lakehouse:8090
+      STREAMING_URL: http://spark:8091
     volumes:
-      - exchange:/exchange:ro
-      - gold_data:/gold
       - dagster_data:/dagster
     ports:
       - "3000:3000"
@@ -187,12 +186,12 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3000/server_info')"]
+      test: ["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://localhost:3000/server_info')"]
       interval: 30s
       timeout: 10s
       start_period: 90s
       retries: 5
-    mem_limit: 1536m
+    mem_limit: 1g
     restart: on-failure
 
   grafana:
@@ -226,6 +225,7 @@ services:
       dockerfile: ui/Dockerfile
     environment:
       <<: *app-env
+      LAKEHOUSE_URL: http://lakehouse:8090
     ports:
       - "8501:8501"
     depends_on:
@@ -244,7 +244,5 @@ volumes:
   minio_data:
   postgres_data:
   spark_state:
-  exchange:
-  gold_data:
   dagster_data:
   grafana_data:

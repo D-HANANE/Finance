@@ -54,9 +54,10 @@ def main():
             now = time.monotonic()
             elapsed = now - started
             if elapsed >= shock_at:
-                market.shock()
-                print("CHOC symbol=AAPL variation_prix=+8%", flush=True)
-                shock_at += shock_every
+                symbol = market.shock_next()
+                print(f"CHOC symbol={symbol} variation_prix=+8%", flush=True)
+                # Each symbol receives one demo shock per full cycle, with equal spacing.
+                shock_at += shock_every / len(SYMBOLS)
 
             # Horloge monotone : compensation des petits retards sans sleep par message.
             due = min(max(0, int(elapsed * rate) - sent), rate)
